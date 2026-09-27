@@ -1,0 +1,6 @@
+{
+  "name": "RelayDrop — Mobile File Sharing & Categorized Vault",
+  "description": "Mobile-first peer-to-peer file sharing application with custom file categorization, real-time WebSocket radar transfers, and instant search by filename, category, or upload date.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

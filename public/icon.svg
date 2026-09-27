@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
+  <rect width="512" height="512" rx="116" fill="#0F172A"/>
+  <!-- Outer Radar Rings -->
+  <circle cx="256" cy="256" r="176" stroke="#0284C7" stroke-width="10" stroke-opacity="0.32" stroke-dasharray="20 14"/>
+  <circle cx="256" cy="256" r="128" stroke="#38BDF8" stroke-width="10" stroke-opacity="0.55"/>
+  <!-- Central Vault Shield & Drop Arrow -->
+  <rect x="172" y="168" width="168" height="176" rx="36" fill="#0284C7"/>
+  <path d="M256 204V292M256 292L220 256M256 292L292 256" stroke="#FFFFFF" stroke-width="22" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M212 316H300" stroke="#BAE6FD" stroke-width="16" stroke-linecap="round"/>
+  <!-- Peer Nodes -->
+  <circle cx="256" cy="80" r="16" fill="#38BDF8"/>
+  <circle cx="408" cy="168" r="14" fill="#38BDF8"/>
+  <circle cx="104" cy="344" r="14" fill="#38BDF8"/>
+</svg>

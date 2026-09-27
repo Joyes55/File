@@ -1,0 +1,131 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Authenticated user profile and role-based access control assignment.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the user."
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "Verified email address of the user."
+        },
+        "displayName": {
+          "type": "string",
+          "description": "Display name shown in peer radar and file provenance."
+        },
+        "photoURL": {
+          "type": "string",
+          "description": "Optional avatar URL from Google Auth."
+        },
+        "role": {
+          "type": "string",
+          "enum": ["admin", "editor", "viewer"],
+          "description": "Authorization role controlling vault permissions."
+        },
+        "deviceModel": {
+          "type": "string",
+          "description": "Detected client device label."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO timestamp when profile was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO timestamp when profile or role was last updated."
+        }
+      },
+      "required": ["uid", "email", "displayName", "role", "createdAt", "updatedAt"]
+    },
+    "VaultFileMetadata": {
+      "title": "VaultFileMetadata",
+      "description": "Firestore audit and ownership record for a categorized vault file.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique file identifier."
+        },
+        "name": {
+          "type": "string",
+          "description": "File name with extension."
+        },
+        "size": {
+          "type": "number",
+          "description": "File size in bytes."
+        },
+        "mimeType": {
+          "type": "string",
+          "description": "MIME type string."
+        },
+        "category": {
+          "type": "string",
+          "description": "Assigned file category."
+        },
+        "uploadedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO upload timestamp."
+        },
+        "uploadDate": {
+          "type": "string",
+          "description": "YYYY-MM-DD upload date string."
+        },
+        "ownerUid": {
+          "type": "string",
+          "description": "UID of the user who uploaded the file."
+        },
+        "senderName": {
+          "type": "string",
+          "description": "Display name of the uploader."
+        },
+        "senderDevice": {
+          "type": "string",
+          "description": "Device label of the uploader."
+        },
+        "roomCode": {
+          "type": "string",
+          "description": "6-digit pairing room code."
+        },
+        "pinProtected": {
+          "type": "boolean",
+          "description": "Whether file requires a 4-digit PIN."
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "size",
+        "mimeType",
+        "category",
+        "uploadedAt",
+        "uploadDate",
+        "ownerUid",
+        "senderName",
+        "roomCode",
+        "pinProtected"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": {
+        "$ref": "#/entities/UserProfile"
+      },
+      "description": "Stores user authentication profiles and RBAC roles (admin, editor, viewer)."
+    },
+    "/vault_files/{fileId}": {
+      "schema": {
+        "$ref": "#/entities/VaultFileMetadata"
+      },
+      "description": "Stores ownership and categorization metadata for shared vault files."
+    }
+  }
+}
