@@ -518,7 +518,7 @@ export const UploadCategorizePanel: React.FC<UploadCategorizePanelProps> = ({
           </form>
         )}
 
-        <div className="flex flex-wrap gap-2">
+        <div className="flex flex-wrap gap-1.5 p-1.5 bg-slate-100 rounded-2xl">
           {categories.map((cat) => {
             const isSelected = batchCategory === cat;
             return (
@@ -526,13 +526,13 @@ export const UploadCategorizePanel: React.FC<UploadCategorizePanelProps> = ({
                 key={cat}
                 type="button"
                 onClick={() => handleApplyBatchCategory(cat)}
-                className={`min-h-[44px] px-4 py-2 rounded-xl text-xs font-semibold transition-colors whitespace-nowrap flex items-center gap-1.5 ${
+                className={`min-h-[38px] px-3.5 py-1.5 rounded-xl text-xs font-semibold transition-all whitespace-nowrap flex items-center gap-1.5 interactive-press ${
                   isSelected
-                    ? 'bg-slate-900 text-white'
-                    : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                    ? 'bg-white text-slate-900 shadow-xs'
+                    : 'text-slate-600 hover:text-slate-900'
                 }`}
               >
-                {isSelected && <Check className="w-3.5 h-3.5 text-sky-400" />}
+                {isSelected && <Check className="w-3.5 h-3.5 text-sky-600" />}
                 <span>{cat}</span>
               </button>
             );
@@ -556,11 +556,11 @@ export const UploadCategorizePanel: React.FC<UploadCategorizePanelProps> = ({
             </button>
           </div>
 
-          <div className="divide-y divide-slate-100 rounded-2xl border border-slate-200 overflow-hidden">
+          <div className="divide-y divide-slate-100 border-y border-slate-100">
             {stagedItems.map((item) => (
               <div
                 key={item.localId}
-                className="p-3.5 bg-white flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                className="py-3 bg-white flex flex-col sm:flex-row sm:items-center justify-between gap-3"
               >
                 <div className="min-w-0 flex-1">
                   <p className="text-sm font-semibold text-slate-900 truncate">

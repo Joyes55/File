@@ -97,6 +97,15 @@
         "pinProtected": {
           "type": "boolean",
           "description": "Whether file requires a 4-digit PIN."
+        },
+        "pinned": {
+          "type": "boolean",
+          "description": "Whether file is pinned to the top of list and grid views."
+        },
+        "pinnedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO timestamp when the file was pinned to top."
         }
       },
       "required": [
@@ -112,6 +121,68 @@
         "roomCode",
         "pinProtected"
       ]
+    },
+    "ActivityLog": {
+      "title": "ActivityLog",
+      "description": "Chronological room audit log record for file uploads, deletions, and category changes.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique activity log identifier."
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "upload",
+            "delete",
+            "category_change",
+            "pin_toggle",
+            "rename",
+            "category_created",
+            "download"
+          ],
+          "description": "Type of file or room operation performed."
+        },
+        "fileId": {
+          "type": "string",
+          "description": "Optional target file identifier."
+        },
+        "fileName": {
+          "type": "string",
+          "description": "Target file or category name."
+        },
+        "category": {
+          "type": "string",
+          "description": "Current or new category associated with the operation."
+        },
+        "previousCategory": {
+          "type": "string",
+          "description": "Previous category prior to a category change."
+        },
+        "actorName": {
+          "type": "string",
+          "description": "Display name of the user who triggered the operation."
+        },
+        "actorDevice": {
+          "type": "string",
+          "description": "Device model of the user."
+        },
+        "roomCode": {
+          "type": "string",
+          "description": "Pairing room code."
+        },
+        "details": {
+          "type": "string",
+          "description": "Human-readable audit summary."
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO timestamp when the operation occurred."
+        }
+      },
+      "required": ["id", "action", "fileName", "actorName", "roomCode", "details", "timestamp"]
     }
   },
   "firestore": {
@@ -126,6 +197,12 @@
         "$ref": "#/entities/VaultFileMetadata"
       },
       "description": "Stores ownership and categorization metadata for shared vault files."
+    },
+    "/activity_logs/{logId}": {
+      "schema": {
+        "$ref": "#/entities/ActivityLog"
+      },
+      "description": "Stores chronological audit trail of file uploads, deletions, and category changes."
     }
   }
 }

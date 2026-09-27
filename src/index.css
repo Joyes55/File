@@ -20,6 +20,7 @@
     color: #0f172a;
     -webkit-tap-highlight-color: transparent;
     overflow-x: hidden;
+    letter-spacing: -0.008em;
   }
 
   ::selection {
@@ -30,16 +31,28 @@
   h1, h2, .font-display {
     font-family: var(--font-display);
     text-wrap: balance;
+    letter-spacing: -0.025em;
   }
 
   .font-mono, .tabular-nums {
     font-family: var(--font-mono);
     font-variant-numeric: tabular-nums;
   }
+
+  button:focus-visible,
+  a:focus-visible,
+  input:focus-visible,
+  select:focus-visible,
+  textarea:focus-visible,
+  [role="button"]:focus-visible {
+    outline: 2px solid #0284c7;
+    outline-offset: 2px;
+  }
 }
 
 /* Smooth tactile interactions */
 .interactive-press {
+  touch-action: manipulation;
   transition: transform 150ms cubic-bezier(0.16, 1, 0.3, 1),
               background-color 150ms cubic-bezier(0.16, 1, 0.3, 1),
               border-color 150ms cubic-bezier(0.16, 1, 0.3, 1),
@@ -52,9 +65,39 @@
   transform: scale(0.98);
 }
 
-/* Mobile safe-area bottom padding & clean horizontal carousels */
+button, a, select, input, [role="button"] {
+  touch-action: manipulation;
+}
+
+/* Prevent iOS Safari auto-zoom on form inputs while keeping desktop crisp */
+@media screen and (max-width: 639px) {
+  input[type="text"],
+  input[type="search"],
+  input[type="email"],
+  input[type="password"],
+  input[type="date"],
+  textarea,
+  select {
+    font-size: 16px;
+  }
+}
+
+/* Mobile safe-area padding & dynamic viewport helpers */
+.pt-safe {
+  padding-top: env(safe-area-inset-top, 0px);
+}
+
 .pb-safe {
   padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+.pb-mobile-nav {
+  padding-bottom: calc(4.5rem + env(safe-area-inset-bottom, 0px));
+}
+
+.max-h-sheet {
+  max-height: 92vh;
+  max-height: 92dvh;
 }
 
 .no-scrollbar::-webkit-scrollbar {
@@ -64,6 +107,7 @@
 .no-scrollbar {
   -ms-overflow-style: none;
   scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
 }
 
 /* Subtle custom scrollbars for code, tables, and horizontal filter bars */

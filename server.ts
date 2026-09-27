@@ -24,6 +24,8 @@ export interface SharedFileRecord {
   downloads: number;
   pinProtected: boolean;
   pinCode?: string;
+  pinned?: boolean;
+  pinnedAt?: string;
   notes?: string;
   previewUrl?: string;
   textContent?: string;
@@ -38,6 +40,31 @@ export interface ConnectedPeer {
   roomCode: string;
   joinedAt: string;
   status: 'idle' | 'receiving' | 'sending';
+}
+
+export type ActivityActionType =
+  | 'upload'
+  | 'delete'
+  | 'category_change'
+  | 'pin_toggle'
+  | 'rename'
+  | 'category_created'
+  | 'download';
+
+export interface ActivityLogRecord {
+  id: string;
+  action: ActivityActionType;
+  fileId?: string;
+  fileName: string;
+  fileSize?: number;
+  category?: string;
+  previousCategory?: string;
+  actorName: string;
+  actorDevice?: string;
+  actorRole?: string;
+  roomCode: string;
+  details: string;
+  timestamp: string;
 }
 
 // Helper to generate a valid tiny 1-second 440Hz sine wave WAV buffer
@@ -131,6 +158,35 @@ const sampleWavDataUrl = createSampleWavDataUrl();
 const filesStore: Map<string, SharedFileRecord> = new Map();
 const categoriesStore: Set<string> = new Set(initialCategories);
 const peersStore: Map<string, ConnectedPeer> = new Map();
+const activityStore: ActivityLogRecord[] = [];
+
+function appendActivityLog(
+  entry: Omit<ActivityLogRecord, 'id' | 'timestamp'> & {
+    id?: string;
+    timestamp?: string;
+  }
+): ActivityLogRecord {
+  const fullEntry: ActivityLogRecord = {
+    id: entry.id || `act-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    timestamp: entry.timestamp || new Date().toISOString(),
+    action: entry.action,
+    fileId: entry.fileId,
+    fileName: entry.fileName,
+    fileSize: entry.fileSize,
+    category: entry.category,
+    previousCategory: entry.previousCategory,
+    actorName: entry.actorName || 'Room Peer',
+    actorDevice: entry.actorDevice || 'Mobile Client',
+    actorRole: entry.actorRole || 'editor',
+    roomCode: entry.roomCode || '842-910',
+    details: entry.details,
+  };
+  activityStore.unshift(fullEntry);
+  if (activityStore.length > 250) {
+    activityStore.length = 250;
+  }
+  return fullEntry;
+}
 
 function loadAssetDataUrl(assetPath: string, mimeType: string): string | undefined {
   try {
@@ -168,6 +224,8 @@ function seedInitialFiles() {
       roomCode: '842-910',
       downloads: 14,
       pinProtected: false,
+      pinned: true,
+      pinnedAt: '2026-09-26T08:00:00.000Z',
       notes: 'Golden hour exterior facade study with lakeside timber reflections.',
       previewUrl: '/src/assets/images/sample_architectural_render_1790426251205.jpg',
       dataUrl: loadAssetDataUrl(archAssetPath, 'image/jpeg'),
@@ -261,6 +319,140 @@ function seedInitialFiles() {
   for (const item of initialFiles) {
     filesStore.set(item.id, item);
   }
+
+  const initialActivities: ActivityLogRecord[] = [
+    {
+      id: 'act-seed-01',
+      action: 'pin_toggle',
+      fileId: 'file-arch-render-01',
+      fileName: 'nordic-pavilion-render-8k.jpg',
+      fileSize: 2845120,
+      category: 'Photos & Media',
+      actorName: 'Soren Lindqvist',
+      actorDevice: 'iPhone 16 Pro',
+      actorRole: 'admin',
+      roomCode: '842-910',
+      details: 'Pinned "nordic-pavilion-render-8k.jpg" to top of vault',
+      timestamp: '2026-09-26T08:00:00.000Z',
+    },
+    {
+      id: 'act-seed-02',
+      action: 'upload',
+      fileId: 'file-arch-render-01',
+      fileName: 'nordic-pavilion-render-8k.jpg',
+      fileSize: 2845120,
+      category: 'Photos & Media',
+      actorName: 'Soren Lindqvist',
+      actorDevice: 'iPhone 16 Pro',
+      actorRole: 'admin',
+      roomCode: '842-910',
+      details: 'Uploaded "nordic-pavilion-render-8k.jpg" (2.7 MB) to Photos & Media',
+      timestamp: '2026-09-26T05:18:00.000Z',
+    },
+    {
+      id: 'act-seed-03',
+      action: 'category_change',
+      fileId: 'file-audio-synth-02',
+      fileName: 'field-synth-hardware-rev4.jpg',
+      fileSize: 1964800,
+      previousCategory: 'Photos & Media',
+      category: 'Design Assets',
+      actorName: 'Maya Lin-Kovacs',
+      actorDevice: 'iPad Pro M4',
+      actorRole: 'editor',
+      roomCode: '842-910',
+      details: 'Reassigned "field-synth-hardware-rev4.jpg" from Photos & Media to Design Assets',
+      timestamp: '2026-09-26T03:50:00.000Z',
+    },
+    {
+      id: 'act-seed-04',
+      action: 'upload',
+      fileId: 'file-audio-synth-02',
+      fileName: 'field-synth-hardware-rev4.jpg',
+      fileSize: 1964800,
+      category: 'Photos & Media',
+      actorName: 'Maya Lin-Kovacs',
+      actorDevice: 'iPad Pro M4',
+      actorRole: 'editor',
+      roomCode: '842-910',
+      details: 'Uploaded "field-synth-hardware-rev4.jpg" (1.9 MB) to Photos & Media',
+      timestamp: '2026-09-26T03:42:00.000Z',
+    },
+    {
+      id: 'act-seed-05',
+      action: 'delete',
+      fileId: 'file-legacy-draft-00',
+      fileName: 'legacy-enclosure-draft-v1.cad',
+      fileSize: 4128000,
+      category: 'Design Assets',
+      actorName: 'Elena Rostova',
+      actorDevice: 'Pixel 9 Pro',
+      actorRole: 'editor',
+      roomCode: '842-910',
+      details: 'Deleted outdated "legacy-enclosure-draft-v1.cad" from Design Assets',
+      timestamp: '2026-09-25T19:12:00.000Z',
+    },
+    {
+      id: 'act-seed-06',
+      action: 'upload',
+      fileId: 'file-arch-spec-03',
+      fileName: 'q3-product-architecture-spec.md',
+      fileSize: Buffer.byteLength(sampleMarkdownSpec, 'utf-8'),
+      category: 'Documents',
+      actorName: 'Elena Rostova',
+      actorDevice: 'Pixel 9 Pro',
+      actorRole: 'editor',
+      roomCode: '842-910',
+      details: 'Uploaded "q3-product-architecture-spec.md" to Documents',
+      timestamp: '2026-09-25T16:20:00.000Z',
+    },
+    {
+      id: 'act-seed-07',
+      action: 'upload',
+      fileId: 'file-impulse-wav-04',
+      fileName: 'acoustic-chime-528hz-test.wav',
+      fileSize: 16044,
+      category: 'Audio & Voice',
+      actorName: 'Devon Brooks',
+      actorDevice: 'Nothing Phone (2a)',
+      actorRole: 'editor',
+      roomCode: '842-910',
+      details: 'Uploaded "acoustic-chime-528hz-test.wav" (16 KB) to Audio & Voice',
+      timestamp: '2026-09-24T14:10:00.000Z',
+    },
+    {
+      id: 'act-seed-08',
+      action: 'upload',
+      fileId: 'file-tokens-json-05',
+      fileName: 'design-tokens-system-v3.json',
+      fileSize: Buffer.byteLength(sampleJsonTokens, 'utf-8'),
+      category: 'Archives & Code',
+      actorName: 'Kenji Takahashi',
+      actorDevice: 'Galaxy S25 Ultra',
+      actorRole: 'editor',
+      roomCode: '842-910',
+      details: 'Uploaded "design-tokens-system-v3.json" to Archives & Code',
+      timestamp: '2026-09-22T11:05:00.000Z',
+    },
+    {
+      id: 'act-seed-09',
+      action: 'upload',
+      fileId: 'file-bom-csv-06',
+      fileName: 'hardware-bom-cost-sheet-2026.csv',
+      fileSize: Buffer.byteLength(sampleCsvBom, 'utf-8'),
+      category: 'Financials',
+      actorName: 'Soren Lindqvist',
+      actorDevice: 'iPhone 16 Pro',
+      actorRole: 'admin',
+      roomCode: '842-910',
+      details: 'Uploaded PIN-protected "hardware-bom-cost-sheet-2026.csv" to Financials',
+      timestamp: '2026-09-19T09:30:00.000Z',
+    },
+  ];
+
+  for (const act of initialActivities) {
+    activityStore.push(act);
+  }
 }
 
 seedInitialFiles();
@@ -325,6 +517,7 @@ async function startServer() {
                 files: Array.from(filesStore.values()).map(sanitizeFileForClient),
                 categories: Array.from(categoriesStore.values()),
                 peers: Array.from(peersStore.values()),
+                activities: activityStore,
               },
             })
           );
@@ -362,12 +555,24 @@ async function startServer() {
   function getCallerAuth(req: express.Request) {
     const uid = String(req.headers['x-user-uid'] || req.body?.ownerUid || '').trim();
     const email = String(req.headers['x-user-email'] || req.body?.ownerEmail || '').trim();
+    const name = String(
+      req.headers['x-user-name'] || req.body?.senderName || req.body?.actorName || 'Alex Rivera'
+    ).trim();
+    const device = String(
+      req.headers['x-user-device'] || req.body?.senderDevice || req.body?.actorDevice || 'Mobile Client'
+    ).trim();
+    const room = String(
+      req.headers['x-room-code'] || req.body?.roomCode || '842-910'
+    ).trim();
     const role = String(req.headers['x-user-role'] || req.body?.userRole || 'editor')
       .trim()
       .toLowerCase();
     return {
       uid,
       email,
+      name,
+      device,
+      room,
       role: role === 'admin' || role === 'viewer' ? role : 'editor',
     };
   }
@@ -378,6 +583,13 @@ async function startServer() {
       files: Array.from(filesStore.values()).map(sanitizeFileForClient),
       categories: Array.from(categoriesStore.values()),
       peers: Array.from(peersStore.values()),
+      activities: activityStore,
+    });
+  });
+
+  app.get('/api/activity', (_req, res) => {
+    res.json({
+      activities: activityStore,
     });
   });
 
@@ -395,10 +607,27 @@ async function startServer() {
       res.status(400).json({ error: 'Category name is required.' });
       return;
     }
+    const hadCategory = categoriesStore.has(rawName);
     categoriesStore.add(rawName);
     const allCategories = Array.from(categoriesStore.values());
     broadcast('categories:updated', allCategories);
-    res.status(201).json({ categories: allCategories, added: rawName });
+
+    let activity: ActivityLogRecord | undefined;
+    if (!hadCategory) {
+      activity = appendActivityLog({
+        action: 'category_created',
+        fileName: rawName,
+        category: rawName,
+        actorName: caller.name,
+        actorDevice: caller.device,
+        actorRole: caller.role,
+        roomCode: caller.room,
+        details: `Created custom category "${rawName}"`,
+      });
+      broadcast('activity:created', activity);
+    }
+
+    res.status(201).json({ categories: allCategories, added: rawName, activity });
   });
 
   app.post('/api/files', (req, res) => {
@@ -445,6 +674,8 @@ async function startServer() {
       downloads: 0,
       pinProtected: Boolean(body.pinCode && String(body.pinCode).trim().length > 0),
       pinCode: body.pinCode ? String(body.pinCode).trim() : undefined,
+      pinned: Boolean(body.pinned),
+      pinnedAt: body.pinned ? String(body.pinnedAt || nowIso) : undefined,
       notes: body.notes ? String(body.notes).trim() : undefined,
       previewUrl: body.previewUrl || undefined,
       textContent: body.textContent || undefined,
@@ -454,14 +685,32 @@ async function startServer() {
     filesStore.set(id, newFile);
     const clientFile = sanitizeFileForClient(newFile);
 
+    const uploadActivity = appendActivityLog({
+      action: 'upload',
+      fileId: newFile.id,
+      fileName: newFile.name,
+      fileSize: newFile.size,
+      category: newFile.category,
+      actorName: newFile.senderName || caller.name,
+      actorDevice: newFile.senderDevice || caller.device,
+      actorRole: caller.role,
+      roomCode: newFile.roomCode,
+      details: `Uploaded "${newFile.name}" to ${newFile.category}${
+        newFile.pinProtected ? ' (PIN-protected)' : ''
+      }`,
+    });
+
     broadcast('file:created', {
       file: clientFile,
       categories: Array.from(categoriesStore.values()),
+      activity: uploadActivity,
     });
+    broadcast('activity:created', uploadActivity);
 
     res.status(201).json({
       file: clientFile,
       categories: Array.from(categoriesStore.values()),
+      activity: uploadActivity,
     });
   });
 
@@ -494,19 +743,123 @@ async function startServer() {
     }
 
     const updates = req.body || {};
+    const prevCategory = existing.category;
+    const prevName = existing.name;
+    const prevPinned = Boolean(existing.pinned);
+    const prevUploadDate = existing.uploadDate;
+    const prevNotes = existing.notes || '';
+
+    const createdActivities: ActivityLogRecord[] = [];
+
     if (typeof updates.category === 'string' && updates.category.trim()) {
-      existing.category = updates.category.trim();
+      const nextCategory = updates.category.trim();
+      existing.category = nextCategory;
       categoriesStore.add(existing.category);
+      if (nextCategory !== prevCategory) {
+        createdActivities.push(
+          appendActivityLog({
+            action: 'category_change',
+            fileId: existing.id,
+            fileName: existing.name,
+            fileSize: existing.size,
+            previousCategory: prevCategory,
+            category: nextCategory,
+            actorName: caller.name,
+            actorDevice: caller.device,
+            actorRole: caller.role,
+            roomCode: existing.roomCode || caller.room,
+            details: `Reassigned "${existing.name}" from ${prevCategory} to ${nextCategory}`,
+          })
+        );
+      }
     }
     if (typeof updates.name === 'string' && updates.name.trim()) {
-      existing.name = updates.name.trim();
+      const nextName = updates.name.trim();
+      existing.name = nextName;
+      if (nextName !== prevName) {
+        createdActivities.push(
+          appendActivityLog({
+            action: 'rename',
+            fileId: existing.id,
+            fileName: nextName,
+            fileSize: existing.size,
+            category: existing.category,
+            actorName: caller.name,
+            actorDevice: caller.device,
+            actorRole: caller.role,
+            roomCode: existing.roomCode || caller.room,
+            details: `Renamed file from "${prevName}" to "${nextName}"`,
+          })
+        );
+      }
     }
     if (typeof updates.notes === 'string') {
-      existing.notes = updates.notes.trim();
+      const nextNotes = updates.notes.trim();
+      existing.notes = nextNotes;
+      if (nextNotes !== prevNotes && (!updates.name || updates.name.trim() === prevName)) {
+        createdActivities.push(
+          appendActivityLog({
+            action: 'rename',
+            fileId: existing.id,
+            fileName: existing.name,
+            fileSize: existing.size,
+            category: existing.category,
+            actorName: caller.name,
+            actorDevice: caller.device,
+            actorRole: caller.role,
+            roomCode: existing.roomCode || caller.room,
+            details: nextNotes
+              ? `Updated transfer notes on "${existing.name}"`
+              : `Cleared transfer notes on "${existing.name}"`,
+          })
+        );
+      }
     }
     if (typeof updates.uploadDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(updates.uploadDate)) {
       existing.uploadDate = updates.uploadDate;
       existing.uploadedAt = `${updates.uploadDate}T12:00:00.000Z`;
+      if (updates.uploadDate !== prevUploadDate) {
+        createdActivities.push(
+          appendActivityLog({
+            action: 'rename',
+            fileId: existing.id,
+            fileName: existing.name,
+            fileSize: existing.size,
+            category: existing.category,
+            actorName: caller.name,
+            actorDevice: caller.device,
+            actorRole: caller.role,
+            roomCode: existing.roomCode || caller.room,
+            details: `Updated upload date for "${existing.name}" to ${updates.uploadDate}`,
+          })
+        );
+      }
+    }
+    if (typeof updates.pinned === 'boolean') {
+      existing.pinned = updates.pinned;
+      existing.pinnedAt = updates.pinned
+        ? typeof updates.pinnedAt === 'string' && updates.pinnedAt.trim()
+          ? updates.pinnedAt.trim()
+          : new Date().toISOString()
+        : undefined;
+      if (updates.pinned !== prevPinned) {
+        createdActivities.push(
+          appendActivityLog({
+            action: 'pin_toggle',
+            fileId: existing.id,
+            fileName: existing.name,
+            fileSize: existing.size,
+            category: existing.category,
+            actorName: caller.name,
+            actorDevice: caller.device,
+            actorRole: caller.role,
+            roomCode: existing.roomCode || caller.room,
+            details: updates.pinned
+              ? `Pinned "${existing.name}" to top of vault`
+              : `Unpinned "${existing.name}" from top of vault`,
+          })
+        );
+      }
     }
 
     filesStore.set(id, existing);
@@ -515,10 +868,14 @@ async function startServer() {
       file: clientFile,
       categories: Array.from(categoriesStore.values()),
     });
+    for (const act of createdActivities) {
+      broadcast('activity:created', act);
+    }
 
     res.json({
       file: clientFile,
       categories: Array.from(categoriesStore.values()),
+      activities: createdActivities,
     });
   });
 
@@ -535,6 +892,7 @@ async function startServer() {
       ? req.body.ids.map((id: unknown) => String(id))
       : [];
     const deletedIds: string[] = [];
+    const createdActivities: ActivityLogRecord[] = [];
     for (const id of ids) {
       const target = filesStore.get(id);
       if (target) {
@@ -545,13 +903,34 @@ async function startServer() {
         if (canDelete) {
           filesStore.delete(id);
           deletedIds.push(id);
+          const act = appendActivityLog({
+            action: 'delete',
+            fileId: target.id,
+            fileName: target.name,
+            fileSize: target.size,
+            category: target.category,
+            actorName: caller.name,
+            actorDevice: caller.device,
+            actorRole: caller.role,
+            roomCode: target.roomCode || caller.room,
+            details: `Deleted "${target.name}" (${target.category}) via bulk action`,
+          });
+          createdActivities.push(act);
         }
       }
     }
     if (deletedIds.length > 0) {
       broadcast('files:bulk-deleted', { ids: deletedIds });
+      for (const act of createdActivities) {
+        broadcast('activity:created', act);
+      }
     }
-    res.json({ deleted: true, ids: deletedIds, count: deletedIds.length });
+    res.json({
+      deleted: true,
+      ids: deletedIds,
+      count: deletedIds.length,
+      activities: createdActivities,
+    });
   });
 
   app.delete('/api/files/:id', (req, res) => {
@@ -583,8 +962,21 @@ async function startServer() {
     }
 
     filesStore.delete(id);
+    const deleteActivity = appendActivityLog({
+      action: 'delete',
+      fileId: existing.id,
+      fileName: existing.name,
+      fileSize: existing.size,
+      category: existing.category,
+      actorName: caller.name,
+      actorDevice: caller.device,
+      actorRole: caller.role,
+      roomCode: existing.roomCode || caller.room,
+      details: `Deleted "${existing.name}" from ${existing.category}`,
+    });
     broadcast('file:deleted', { id });
-    res.json({ deleted: true, id });
+    broadcast('activity:created', deleteActivity);
+    res.json({ deleted: true, id, activity: deleteActivity });
   });
 
   app.post('/api/files/:id/verify-pin', (req, res) => {
@@ -624,10 +1016,22 @@ async function startServer() {
 
     file.downloads += 1;
     filesStore.set(id, file);
+    const dlActivity = appendActivityLog({
+      action: 'download',
+      fileId: file.id,
+      fileName: file.name,
+      fileSize: file.size,
+      category: file.category,
+      actorName: String(req.query.actor || 'Room Peer'),
+      actorDevice: 'Room Client',
+      roomCode: file.roomCode,
+      details: `Downloaded "${file.name}" (Download #${file.downloads})`,
+    });
     broadcast('file:updated', {
       file: sanitizeFileForClient(file),
       categories: Array.from(categoriesStore.values()),
     });
+    broadcast('activity:created', dlActivity);
 
     const safeFilename = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
     res.setHeader('Content-Disposition', `attachment; filename="${safeFilename}"`);

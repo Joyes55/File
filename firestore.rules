@@ -32,6 +32,8 @@ service cloud.firestore {
     //   - senderDevice: string (optional, <= 80 chars)
     //   - roomCode: string (required, 1..20 chars)
     //   - pinProtected: boolean (required)
+    //   - pinned: boolean (optional)
+    //   - pinnedAt: string (optional, ISO timestamp)
     //
     // ===============================================================
 
@@ -129,6 +131,20 @@ service cloud.firestore {
         (isAdmin() || resource.data.ownerUid == request.auth.uid);
 
       allow delete: if isAdmin() || (isEditorOrAdmin() && resource.data.ownerUid == request.auth.uid);
+    }
+
+    // Room Activity Audit Log collection
+    match /activity_logs/{logId} {
+      allow read: if isAuthenticated();
+      allow create: if isEditorOrAdmin() &&
+        request.resource.data.keys().hasAll(['id', 'action', 'fileName', 'actorName', 'roomCode', 'details', 'timestamp']) &&
+        request.resource.data.id is string &&
+        request.resource.data.fileName is string &&
+        request.resource.data.actorName is string &&
+        request.resource.data.roomCode is string &&
+        request.resource.data.details is string &&
+        request.resource.data.timestamp is string;
+      allow update, delete: if isAdmin();
     }
   }
 }

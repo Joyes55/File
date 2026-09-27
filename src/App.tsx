@@ -39,6 +39,10 @@ import {
   LayoutGrid,
   RefreshCw,
   Share2,
+  Monitor,
+  UserPlus,
+  Pin,
+  Activity,
 } from 'lucide-react';
 import { onAuthStateChanged } from 'firebase/auth';
 import {
@@ -73,14 +77,24 @@ import {
   formatRoleLabel,
   TransferProgressState,
   estimateTargetThroughputBytesPerSec,
+  ActivityLogEntry,
 } from './types/files';
+import {
+  ActivityLogPanel,
+  ActivitySidePanelCard,
+} from './components/ActivityLogPanel';
 import { UploadCategorizePanel } from './components/UploadCategorizePanel';
 import {
   FileDetailSheet,
   resolveImageSource,
   resolveTextContent,
 } from './components/FileDetailSheet';
-import { QrMatrixSvg } from './components/QrMatrixSvg';
+import {
+  QrMatrixSvg,
+  buildFileQrPayloadUrl,
+  downloadFileQrPng,
+  downloadFileQrSvg,
+} from './components/QrMatrixSvg';
 import { QrScannerModal } from './components/QrScannerModal';
 import { AuthAccessModal } from './components/AuthAccessModal';
 import { PWAInstallModal } from './components/PWAInstallModal';
@@ -122,17 +136,21 @@ export default function App() {
   const [files, setFiles] = useState<SharedFile[]>([]);
   const [categories, setCategories] = useState<string[]>(DEFAULT_CATEGORIES);
   const [peers, setPeers] = useState<ConnectedPeer[]>([]);
+  const [activities, setActivities] = useState<ActivityLogEntry[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
 
   // Navigation & Layout State
   const [activeTab, setActiveTab] = useState<ActiveTab>('vault');
   const [vaultViewMode, setVaultViewMode] = useState<'list' | 'grid'>('list');
   const [selectedFileId, setSelectedFileId] = useState<string | null>(null);
+  const [qrModalFileId, setQrModalFileId] = useState<string | null>(null);
+  const [pairingQrFileId, setPairingQrFileId] = useState<string>('');
+  const [copiedFileQrUrl, setCopiedFileQrUrl] = useState<boolean>(false);
   const [quickUploadModalOpen, setQuickUploadModalOpen] = useState<boolean>(false);
   const [qrScannerOpen, setQrScannerOpen] = useState<boolean>(false);
   const [authModalOpen, setAuthModalOpen] = useState<boolean>(false);
   const [pwaModalOpen, setPwaModalOpen] = useState<boolean>(false);
-  const [mobileShellMode, setMobileShellMode] = useState<boolean>(true);
+  const [mobileShellMode, setMobileShellMode] = useState<boolean>(false);
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
   const [activeTransfers, setActiveTransfers] = useState<TransferProgressState[]>([]);
 
@@ -155,10 +173,21 @@ export default function App() {
     setActiveTransfers((prev) => prev.filter((t) => t.id !== id));
   }, []);
 
-  // Authentication & Role-Based Authorization State
-  const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
+  // Authentication & Role-Based Authorization State (Defaults to active local Admin session so all UI controls work immediately)
+  const [currentUser, setCurrentUser] = useState<UserProfile | null>(() => {
+    const nowIso = new Date().toISOString();
+    return {
+      uid: 'local-peer',
+      email: 'alex@relaydrop.app',
+      displayName: 'Alex Rivera',
+      role: 'admin',
+      deviceModel: detectDeviceLabel(),
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    };
+  });
   const [allUsers, setAllUsers] = useState<UserProfile[]>([]);
-  const [isAuthReady, setIsAuthReady] = useState<boolean>(false);
+  const [isAuthReady, setIsAuthReady] = useState<boolean>(true);
 
   // Multi-Select & Bulk Delete State
   const [isMultiSelectMode, setIsMultiSelectMode] = useState<boolean>(false);
@@ -172,6 +201,8 @@ export default function App() {
   const [datePreset, setDatePreset] = useState<DateRangePreset>('all');
   const [customDateFilter, setCustomDateFilter] = useState<string>('');
   const [sortBy, setSortBy] = useState<SortOption>('newest');
+  const [showPinnedOnly, setShowPinnedOnly] = useState<boolean>(false);
+  const [mobileFiltersExpanded, setMobileFiltersExpanded] = useState<boolean>(false);
   const [newCategoryInput, setNewCategoryInput] = useState<string>('');
   const [showAddCategoryInline, setShowAddCategoryInline] = useState<boolean>(false);
 
@@ -210,6 +241,8 @@ export default function App() {
       } else if (e.key === 'Escape') {
         if (confirmBulkDeleteOpen && !isBulkDeleting) {
           setConfirmBulkDeleteOpen(false);
+        } else if (qrModalFileId) {
+          setQrModalFileId(null);
         } else if (quickUploadModalOpen) {
           setQuickUploadModalOpen(false);
         } else if (isMultiSelectMode) {
@@ -220,7 +253,7 @@ export default function App() {
     };
     window.addEventListener('keydown', handleGlobalKeyDown);
     return () => window.removeEventListener('keydown', handleGlobalKeyDown);
-  }, [activeTab, confirmBulkDeleteOpen, isBulkDeleting, quickUploadModalOpen, isMultiSelectMode]);
+  }, [activeTab, confirmBulkDeleteOpen, isBulkDeleting, qrModalFileId, quickUploadModalOpen, isMultiSelectMode]);
 
   // Firebase Authentication & Firestore User Profile / Role Listener
   useEffect(() => {
@@ -238,7 +271,19 @@ export default function App() {
       }
 
       if (!fbUser) {
-        setCurrentUser(null);
+        setCurrentUser((prev) => {
+          if (prev && prev.uid === 'local-peer') return prev;
+          const nowIso = new Date().toISOString();
+          return {
+            uid: 'local-peer',
+            email: 'alex@relaydrop.app',
+            displayName: 'Alex Rivera',
+            role: 'admin',
+            deviceModel: senderDevice,
+            createdAt: nowIso,
+            updatedAt: nowIso,
+          };
+        });
         setAllUsers([]);
         setIsAuthReady(true);
         return;
@@ -321,6 +366,9 @@ export default function App() {
   const getAuthHeaders = useCallback((): Record<string, string> => {
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
+      'x-user-name': currentUser?.displayName || senderName || 'Alex Rivera',
+      'x-user-device': currentUser?.deviceModel || senderDevice || 'Mobile Client',
+      'x-room-code': roomCode || '842-910',
     };
     if (currentUser) {
       headers['x-user-uid'] = currentUser.uid;
@@ -328,23 +376,85 @@ export default function App() {
       headers['x-user-role'] = currentUser.role;
     }
     return headers;
-  }, [currentUser]);
+  }, [currentUser, roomCode, senderDevice, senderName]);
+
+  const recordActivitiesLocally = useCallback(
+    (incoming: ActivityLogEntry | ActivityLogEntry[] | undefined) => {
+      if (!incoming) return;
+      const list = Array.isArray(incoming) ? incoming : [incoming];
+      if (list.length === 0) return;
+
+      setActivities((prev) => {
+        const seen = new Set(prev.map((a) => a.id));
+        const fresh = list.filter((item) => item && item.id && !seen.has(item.id));
+        if (fresh.length === 0) return prev;
+        return [...fresh, ...prev].slice(0, 250);
+      });
+
+      if (currentUser && currentUser.uid !== 'local-peer') {
+        for (const entry of list) {
+          if (entry && entry.id) {
+            setDoc(doc(db, 'activity_logs', entry.id), entry).catch(() => {});
+          }
+        }
+      }
+    },
+    [currentUser]
+  );
 
   const handleUpdateLocalRole = async (newRole: UserRole) => {
-    if (!currentUser) return;
     const nowIso = new Date().toISOString();
+    if (!currentUser) {
+      const created: UserProfile = {
+        uid: 'local-peer',
+        email: 'alex@relaydrop.app',
+        displayName: senderName || 'Alex Rivera',
+        role: newRole,
+        deviceModel: senderDevice,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      };
+      setCurrentUser(created);
+      return;
+    }
     const updated: UserProfile = {
       ...currentUser,
       role: newRole,
       updatedAt: nowIso,
     };
     setCurrentUser(updated);
-    try {
-      await setDoc(doc(db, 'users', currentUser.uid), updated, { merge: true });
-    } catch {
-      // If Firestore rule prevents non-admin self-elevation in strict mode, keep session role active for testing
+    if (currentUser.uid !== 'local-peer') {
+      try {
+        await setDoc(doc(db, 'users', currentUser.uid), updated, { merge: true });
+      } catch {
+        // Keep session role active for testing if Firestore rule restricts self-elevation
+      }
     }
   };
+
+  const handleActivateLocalSession = useCallback(
+    (role: UserRole, customName?: string) => {
+      const nowIso = new Date().toISOString();
+      const finalName = customName?.trim() || senderName || 'Alex Rivera';
+      const localProfile: UserProfile = {
+        uid: 'local-peer',
+        email: 'alex@relaydrop.app',
+        displayName: finalName,
+        role,
+        deviceModel: senderDevice,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      };
+      setCurrentUser(localProfile);
+      setSenderName(finalName);
+      triggerToast(`Active session set to ${finalName} (${formatRoleLabel(role)})`);
+    },
+    [senderDevice, senderName, triggerToast]
+  );
+
+  const handleSignOutSession = useCallback(() => {
+    setCurrentUser(null);
+  }, []);
 
   // Fetch initial state (with offline localStorage cache fallback) & check URL query param
   useEffect(() => {
@@ -358,6 +468,9 @@ export default function App() {
         }
         if (Array.isArray(cached.categories) && cached.categories.length > 0) {
           setCategories(cached.categories);
+        }
+        if (Array.isArray(cached.activities) && cached.activities.length > 0) {
+          setActivities(cached.activities);
         }
       }
     } catch {
@@ -377,6 +490,9 @@ export default function App() {
         if (Array.isArray(data.peers)) {
           setPeers(data.peers);
         }
+        if (Array.isArray(data.activities)) {
+          setActivities(data.activities);
+        }
         setIsLoading(false);
 
         const params = new URLSearchParams(window.location.search);
@@ -388,6 +504,27 @@ export default function App() {
         const linkedFileId = params.get('file');
         if (linkedFileId) {
           setSelectedFileId(linkedFileId);
+          const shouldAutoDownload = params.get('download') === '1';
+          const urlPin = params.get('pin')?.trim() || undefined;
+          if (shouldAutoDownload && Array.isArray(data.files)) {
+            const matchedFile = (data.files as SharedFile[]).find(
+              (f) => f.id === linkedFileId
+            );
+            if (matchedFile && (!matchedFile.pinProtected || urlPin)) {
+              setTimeout(() => {
+                const pinSuffix =
+                  matchedFile.pinProtected && urlPin
+                    ? `?pin=${encodeURIComponent(urlPin)}`
+                    : '';
+                const dlLink = document.createElement('a');
+                dlLink.href = `/api/files/${matchedFile.id}/download${pinSuffix}`;
+                dlLink.download = matchedFile.name;
+                document.body.appendChild(dlLink);
+                dlLink.click();
+                document.body.removeChild(dlLink);
+              }, 250);
+            }
+          }
         }
       })
       .catch(() => {
@@ -408,13 +545,14 @@ export default function App() {
         JSON.stringify({
           files: files.slice(0, 30),
           categories,
+          activities: activities.slice(0, 50),
           updatedAt: new Date().toISOString(),
         })
       );
     } catch {
       // Ignore storage quota errors
     }
-  }, [files, categories]);
+  }, [files, categories, activities]);
 
   const handleRefreshVault = useCallback(async () => {
     if (isRefreshing) return;
@@ -428,6 +566,7 @@ export default function App() {
           setCategories(data.categories);
         }
         if (Array.isArray(data.peers)) setPeers(data.peers);
+        if (Array.isArray(data.activities)) setActivities(data.activities);
         triggerToast('Synced mobile vault with room peers');
       }
     } catch {
@@ -453,7 +592,7 @@ export default function App() {
 
     // Only trigger horizontal tab swipe if horizontal delta > 75px and dominates vertical scroll
     if (Math.abs(dx) > 75 && Math.abs(dx) > Math.abs(dy) * 1.8) {
-      const order: ActiveTab[] = ['vault', 'upload', 'radar', 'rooms'];
+      const order: ActiveTab[] = ['vault', 'upload', 'activity', 'radar', 'rooms'];
       const currentIdx = order.indexOf(activeTab);
       if (dx < 0 && currentIdx < order.length - 1) {
         setActiveTab(order[currentIdx + 1]);
@@ -501,6 +640,15 @@ export default function App() {
             if (Array.isArray(message.payload.peers)) {
               setPeers(message.payload.peers);
             }
+            if (Array.isArray(message.payload.activities)) {
+              setActivities(message.payload.activities);
+            }
+          } else if (message.event === 'activity:created' && message.payload?.id) {
+            const incomingAct: ActivityLogEntry = message.payload;
+            setActivities((prev) => {
+              if (prev.some((a) => a.id === incomingAct.id)) return prev;
+              return [incomingAct, ...prev].slice(0, 250);
+            });
           } else if (message.event === 'file:created' && message.payload?.file) {
             const incomingFile: SharedFile = message.payload.file;
             setFiles((prev) => {
@@ -710,6 +858,9 @@ export default function App() {
       if (Array.isArray(data.categories)) {
         setCategories(data.categories);
       }
+      if (data.activity) {
+        recordActivitiesLocally(data.activity);
+      }
       triggerToast(`Uploaded "${payload.name}" under ${payload.category}`);
     } else {
       const errData = await res.json().catch(() => ({}));
@@ -755,8 +906,13 @@ export default function App() {
         peerName: `From ${file.senderName}`,
       });
 
+      const actorParam = `actor=${encodeURIComponent(
+        currentUser?.displayName || senderName || 'Room Peer'
+      )}`;
       const pinParam =
-        file.pinProtected && pinCode ? `?pin=${encodeURIComponent(pinCode)}` : '';
+        file.pinProtected && pinCode
+          ? `?pin=${encodeURIComponent(pinCode)}&${actorParam}`
+          : `?${actorParam}`;
       const downloadUrl = `/api/files/${file.id}/download${pinParam}`;
 
       const fetchPromise = fetch(downloadUrl).then(async (res) => {
@@ -850,7 +1006,13 @@ export default function App() {
 
   const handleUpdateFile = async (
     id: string,
-    updates: { category?: string; name?: string; notes?: string; uploadDate?: string }
+    updates: {
+      category?: string;
+      name?: string;
+      notes?: string;
+      uploadDate?: string;
+      pinned?: boolean;
+    }
   ) => {
     const targetFile = files.find((f) => f.id === id);
     if (!targetFile || !canModifyOrDeleteFile(currentUser, targetFile)) {
@@ -880,6 +1042,8 @@ export default function App() {
               uploadDate: data.file.uploadDate,
               name: data.file.name,
               notes: data.file.notes || '',
+              pinned: Boolean(data.file.pinned),
+              pinnedAt: data.file.pinnedAt || null,
             },
             { merge: true }
           ).catch(() => {});
@@ -888,7 +1052,16 @@ export default function App() {
       if (Array.isArray(data.categories)) {
         setCategories(data.categories);
       }
-      if (updates.category) {
+      if (Array.isArray(data.activities)) {
+        recordActivitiesLocally(data.activities);
+      }
+      if (typeof updates.pinned === 'boolean') {
+        triggerToast(
+          updates.pinned
+            ? `Pinned "${targetFile.name}" to top of vault`
+            : `Unpinned "${targetFile.name}" from top`
+        );
+      } else if (updates.category) {
         triggerToast(`Categorized as "${updates.category}"`);
       } else if (updates.name) {
         triggerToast(`Updated "${updates.name}"`);
@@ -897,6 +1070,27 @@ export default function App() {
       const errData = await res.json().catch(() => ({}));
       triggerToast(errData.error || 'Not authorized to modify this file.');
     }
+  };
+
+  const handleTogglePinFile = async (file: SharedFile) => {
+    await handleUpdateFile(file.id, { pinned: !file.pinned });
+  };
+
+  const handleBulkTogglePin = async (pinState: boolean) => {
+    if (checkedFileIds.length === 0) return;
+    const targets = files.filter((f) => checkedFileIds.includes(f.id));
+    for (const file of targets) {
+      if (Boolean(file.pinned) !== pinState) {
+        await handleUpdateFile(file.id, { pinned: pinState });
+      }
+    }
+    triggerToast(
+      pinState
+        ? `Pinned ${targets.length} selected ${targets.length === 1 ? 'file' : 'files'} to top`
+        : `Unpinned ${targets.length} selected ${targets.length === 1 ? 'file' : 'files'}`
+    );
+    setCheckedFileIds([]);
+    setIsMultiSelectMode(false);
   };
 
   const handleDeleteFile = async (id: string) => {
@@ -916,6 +1110,10 @@ export default function App() {
       headers: getAuthHeaders(),
     });
     if (res.ok) {
+      const data = await res.json().catch(() => ({}));
+      if (data.activity) {
+        recordActivitiesLocally(data.activity);
+      }
       setFiles((prev) => prev.filter((f) => f.id !== id));
       setSelectedFileId(null);
       setCheckedFileIds((prev) => prev.filter((item) => item !== id));
@@ -971,6 +1169,9 @@ export default function App() {
         for (const remId of actualDeletedIds) {
           deleteDoc(doc(db, 'files', remId)).catch(() => {});
         }
+        if (Array.isArray(data.activities)) {
+          recordActivitiesLocally(data.activities);
+        }
         setCheckedFileIds([]);
         setConfirmBulkDeleteOpen(false);
         setIsMultiSelectMode(false);
@@ -1011,6 +1212,9 @@ export default function App() {
       if (Array.isArray(data.categories)) {
         setCategories(data.categories);
       }
+      if (data.activity) {
+        recordActivitiesLocally(data.activity);
+      }
       if (currentUser) {
         const slug = trimmed.toLowerCase().replace(/[^a-z0-9]+/g, '-');
         setDoc(doc(db, 'categories', slug || `cat-${Date.now()}`), {
@@ -1036,7 +1240,12 @@ export default function App() {
     setShowAddCategoryInline(false);
   };
 
-  // Filtered and sorted files with search match attribution
+  const pinnedCount = useMemo(
+    () => files.filter((f) => Boolean(f.pinned)).length,
+    [files]
+  );
+
+  // Filtered and sorted files with search match attribution (Pinned files always appear at the top)
   const filteredResults = useMemo(() => {
     const evaluated = files
       .map((file) => {
@@ -1049,9 +1258,15 @@ export default function App() {
         );
         return { file, ...result };
       })
-      .filter((item) => item.matches);
+      .filter((item) => item.matches && (!showPinnedOnly || Boolean(item.file.pinned)));
 
     evaluated.sort((a, b) => {
+      const aPinned = Boolean(a.file.pinned);
+      const bPinned = Boolean(b.file.pinned);
+      if (aPinned !== bPinned) {
+        return aPinned ? -1 : 1;
+      }
+
       if (sortBy === 'newest') {
         return (
           b.file.uploadDate.localeCompare(a.file.uploadDate) ||
@@ -1071,7 +1286,7 @@ export default function App() {
     });
 
     return evaluated;
-  }, [files, searchQuery, selectedCategory, datePreset, customDateFilter, sortBy]);
+  }, [files, searchQuery, selectedCategory, datePreset, customDateFilter, sortBy, showPinnedOnly]);
 
   // Category counts for filter tabs
   const categoryCounts = useMemo(() => {
@@ -1088,6 +1303,18 @@ export default function App() {
   const selectedFile = useMemo(
     () => files.find((f) => f.id === selectedFileId) || null,
     [files, selectedFileId]
+  );
+
+  const qrModalFile = useMemo(
+    () => files.find((f) => f.id === qrModalFileId) || null,
+    [files, qrModalFileId]
+  );
+
+  const activePairingQrFile = useMemo(
+    () =>
+      files.find((f) => f.id === pairingQrFileId) ||
+      (files.length > 0 ? files[0] : null),
+    [files, pairingQrFileId]
   );
 
   // Compute Prev / Next file navigation inside filteredResults
@@ -1130,13 +1357,108 @@ export default function App() {
     setSelectedCategory('All');
     setDatePreset('all');
     setCustomDateFilter('');
+    setShowPinnedOnly(false);
   };
 
   const hasActiveFilters =
     searchQuery.trim() !== '' ||
     selectedCategory !== 'All' ||
     datePreset !== 'all' ||
-    customDateFilter !== '';
+    customDateFilter !== '' ||
+    showPinnedOnly;
+
+  const handleExportVisibleFilesToCsv = useCallback(() => {
+    if (filteredResults.length === 0) {
+      triggerToast('No visible files available to export.');
+      return;
+    }
+
+    const escapeCsvCell = (
+      value: string | number | boolean | undefined | null
+    ): string => {
+      const str = value === undefined || value === null ? '' : String(value);
+      if (/[",\r\n]/.test(str)) {
+        return `"${str.replace(/"/g, '""')}"`;
+      }
+      return str;
+    };
+
+    const headers = [
+      'File ID',
+      'File Name',
+      'Category',
+      'Size (Bytes)',
+      'Formatted Size',
+      'MIME Type',
+      'Upload Date',
+      'Uploaded Timestamp',
+      'Sender Name',
+      'Sender Device',
+      'Room Code',
+      'Pinned to Top',
+      'PIN Protected',
+      'Downloads',
+      'Transfer Notes',
+      'Direct Download URL',
+      'Room QR Download URL',
+    ];
+
+    const rows = filteredResults.map(({ file }) => {
+      const origin =
+        typeof window !== 'undefined'
+          ? window.location.origin
+          : 'https://relaydrop.local';
+      const directDownloadUrl = `${origin}/api/files/${encodeURIComponent(
+        file.id
+      )}/download`;
+      const qrDownloadUrl = buildFileQrPayloadUrl({
+        fileId: file.id,
+        roomCode: file.roomCode || roomCode,
+      });
+
+      return [
+        file.id,
+        file.name,
+        file.category,
+        file.size,
+        formatBytes(file.size),
+        file.mimeType,
+        file.uploadDate,
+        file.uploadedAt,
+        file.senderName,
+        file.senderDevice,
+        file.roomCode,
+        file.pinned ? 'Yes' : 'No',
+        file.pinProtected ? 'Yes' : 'No',
+        file.downloads,
+        file.notes || '',
+        directDownloadUrl,
+        qrDownloadUrl,
+      ]
+        .map(escapeCsvCell)
+        .join(',');
+    });
+
+    const csvContent = `\uFEFF${headers.map(escapeCsvCell).join(',')}\r\n${rows.join(
+      '\r\n'
+    )}`;
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    const safeRoom = (roomCode || 'vault').replace(/[^a-zA-Z0-9_-]/g, '-');
+    link.href = url;
+    link.download = `relaydrop-vault-export-${safeRoom}-${getTodayIsoDate()}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
+
+    triggerToast(
+      `Exported ${filteredResults.length} visible ${
+        filteredResults.length === 1 ? 'file' : 'files'
+      } to CSV`
+    );
+  }, [filteredResults, roomCode, triggerToast]);
 
   const handleCopyRoomCode = async () => {
     try {
@@ -1174,17 +1496,45 @@ export default function App() {
     });
   };
 
+  const handleSimulateNewPeer = () => {
+    const samplePeers = [
+      { name: 'Clara Vance', deviceModel: 'iPhone 16 Pro (UWB)' },
+      { name: 'Liam O’Connor', deviceModel: 'MacBook Pro M4 Max' },
+      { name: 'Zoe Chen', deviceModel: 'Pixel 9 Pro Fold' },
+      { name: 'Mateo Silva', deviceModel: 'iPad Pro 13" OLED' },
+    ];
+    const pick = samplePeers[peers.length % samplePeers.length];
+    const simPeer: ConnectedPeer = {
+      id: `sim-peer-${Date.now().toString(36)}`,
+      name: pick.name,
+      deviceModel: pick.deviceModel,
+      roomCode,
+      joinedAt: new Date().toISOString(),
+      status: 'idle',
+    };
+    setPeers((prev) => [...prev, simPeer]);
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(
+        JSON.stringify({
+          event: 'peer:join',
+          payload: simPeer,
+        })
+      );
+    }
+    triggerToast(`${simPeer.name} (${simPeer.deviceModel}) joined Room ${roomCode}`);
+  };
   const navTabs: { id: ActiveTab; label: string }[] = [
-    { id: 'vault', label: 'Shared Vault' },
-    { id: 'upload', label: 'Upload & Categorize' },
-    { id: 'radar', label: 'Nearby Radar' },
-    { id: 'rooms', label: 'Pairing Rooms' },
+    { id: 'vault', label: 'Vault' },
+    { id: 'upload', label: 'Upload' },
+    { id: 'activity', label: 'Activity' },
+    { id: 'radar', label: 'Radar' },
+    { id: 'rooms', label: 'Pairing' },
   ];
 
   return (
-    <div id="top" className="min-h-screen flex flex-col bg-[#f8fafc] text-slate-900 pb-20 md:pb-12">
-      {/* Top Bar Contract: [Brand title, one line] — [4 nav links] — [Primary action] */}
-      <header className="sticky top-0 z-30 h-14 bg-white/90 backdrop-blur-md border-b border-slate-200/80 px-4 sm:px-6 flex items-center justify-between">
+    <div id="top" className="min-h-screen min-h-dvh flex flex-col bg-[#f8fafc] text-slate-900 pb-mobile-nav md:pb-12">
+      {/* Strict 3-Zone Top Bar Contract: [Brand title, one line] — [5 nav links] — [2 primary actions] */}
+      <header className="sticky top-0 z-30 h-14 bg-white/95 backdrop-blur-md border-b border-slate-200/80 px-4 sm:px-6 flex items-center justify-between gap-4">
         {/* Zone 1: Single text element wordmark */}
         <a
           href="#top"
@@ -1197,8 +1547,8 @@ export default function App() {
           RelayDrop
         </a>
 
-        {/* Zone 2: 4 clean text navigation links with smooth layout underline */}
-        <nav className="hidden md:flex items-center gap-7 text-sm font-semibold text-slate-600 h-full">
+        {/* Zone 2: 5 clean text navigation links with subtle hover/active underline */}
+        <nav className="hidden md:flex items-center gap-7 text-sm font-medium text-slate-600 h-full">
           {navTabs.map((tab) => {
             const isActive = activeTab === tab.id;
             return (
@@ -1207,7 +1557,7 @@ export default function App() {
                 type="button"
                 onClick={() => setActiveTab(tab.id)}
                 className={`relative h-full flex items-center transition-colors whitespace-nowrap ${
-                  isActive ? 'text-slate-900' : 'text-slate-500 hover:text-slate-900'
+                  isActive ? 'text-slate-900 font-semibold' : 'text-slate-500 hover:text-slate-900'
                 }`}
               >
                 <span>{tab.label}</span>
@@ -1223,60 +1573,17 @@ export default function App() {
           })}
         </nav>
 
-        {/* Zone 3: Primary action & Auth / RBAC / Mobile App Trigger */}
-        <div className="flex items-center gap-1.5 sm:gap-2">
-          <button
-            type="button"
-            onClick={() => setPwaModalOpen(true)}
-            title="Mobile App & Install Settings"
-            className={`min-h-[40px] px-3 py-2 rounded-xl text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap interactive-press ${
-              isInstallable
-                ? 'bg-sky-600 hover:bg-sky-700 text-white'
-                : 'bg-slate-100 hover:bg-slate-200 text-slate-900'
-            }`}
-          >
-            <Smartphone className={`w-3.5 h-3.5 ${isInstallable ? 'text-white' : 'text-sky-600'}`} />
-            <span className="hidden sm:inline">
-              {isInstalled ? 'App Mode' : isInstallable ? 'Install App' : 'Mobile App'}
-            </span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setAuthModalOpen(true)}
-            className={`min-h-[40px] px-3 py-2 rounded-xl text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap interactive-press ${
-              currentUser
-                ? 'bg-sky-50 hover:bg-sky-100 text-sky-900 border border-sky-200'
-                : 'bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-200'
-            }`}
-          >
-            {currentUser ? (
-              <>
-                <ShieldCheck className="w-3.5 h-3.5 text-sky-600" />
-                <span className="hidden lg:inline max-w-[100px] truncate">
-                  {currentUser.displayName}
-                </span>
-                <span aria-hidden="true" className="hidden lg:inline text-sky-400">·</span>
-                <span className="font-mono text-[11px] uppercase tracking-tight">
-                  {currentUser.role}
-                </span>
-              </>
-            ) : (
-              <>
-                <LogIn className="w-3.5 h-3.5 text-amber-600" />
-                <span>{isAuthReady ? 'Sign In' : 'Auth...'}</span>
-              </>
-            )}
-          </button>
-
+        {/* Zone 3: 2 primary actions (Scan QR + Upload) */}
+        <div className="flex items-center gap-2 shrink-0">
           <button
             type="button"
             onClick={() => setQrScannerOpen(true)}
             aria-label="Scan QR Code"
-            className="min-h-[40px] px-3 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-900 text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap interactive-press"
+            title="Scan QR Code"
+            className="min-h-[40px] px-3 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-900 text-xs font-semibold flex items-center justify-center gap-1.5 whitespace-nowrap interactive-press"
           >
             <Camera className="w-3.5 h-3.5 text-sky-600" />
-            <span className="hidden sm:inline">Scan QR</span>
+            <span>Scan QR</span>
           </button>
 
           <button
@@ -1293,7 +1600,7 @@ export default function App() {
               }
               setQuickUploadModalOpen(true);
             }}
-            className="min-h-[40px] px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold whitespace-nowrap interactive-press"
+            className="min-h-[40px] px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold whitespace-nowrap interactive-press"
           >
             + Upload
           </button>
@@ -1329,19 +1636,118 @@ export default function App() {
       <main
         onTouchStart={handleTouchStart}
         onTouchEnd={handleTouchEnd}
-        className={`flex-1 w-full mx-auto px-3 sm:px-6 pt-4 sm:pt-6 transition-all duration-200 ${
-          mobileShellMode ? 'max-w-[460px] pb-20' : 'max-w-[1200px]'
+        className={`flex-1 w-full mx-auto px-3 sm:px-6 lg:px-8 pt-3 sm:pt-6 transition-all duration-200 ${
+          mobileShellMode
+            ? 'max-w-[430px] pb-28 my-2 sm:my-4 sm:rounded-[36px] sm:border-[6px] sm:border-slate-900 sm:bg-[#f8fafc] sm:shadow-2xl'
+            : 'max-w-7xl pb-24 md:pb-12'
         }`}
       >
+        {mobileShellMode && (
+          <div className="mb-3 px-3 py-2 rounded-2xl bg-slate-900 text-white flex items-center justify-between text-xs">
+            <div className="flex items-center gap-2">
+              <Smartphone className="w-3.5 h-3.5 text-sky-400" />
+              <span className="font-semibold">Mobile Handset Shell</span>
+              <span className="font-mono text-[11px] text-slate-400">412px</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setMobileShellMode(false)}
+              className="px-2.5 py-1 rounded-lg bg-white/10 hover:bg-white/20 text-[11px] font-semibold text-sky-300 transition-colors"
+            >
+              Exit Handset
+            </button>
+          </div>
+        )}
+
+        {/* Contextual Workspace Utility Bar */}
+        <div className="mb-4 pb-3 border-b border-slate-200/80 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-600">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+            <button
+              type="button"
+              onClick={() => setActiveTab('rooms')}
+              className="font-semibold text-slate-900 hover:text-sky-700 flex items-center gap-1.5 transition-colors whitespace-nowrap"
+            >
+              <span className="w-2 h-2 rounded-full bg-emerald-500" />
+              <span>Room {roomCode}</span>
+            </button>
+            <span aria-hidden="true" className="text-slate-300">·</span>
+            <button
+              type="button"
+              onClick={() => setActiveTab('radar')}
+              className="hover:text-slate-900 font-mono tabular-nums transition-colors whitespace-nowrap"
+            >
+              {peers.length} active {peers.length === 1 ? 'peer' : 'peers'}
+            </button>
+            <span aria-hidden="true" className="hidden sm:inline text-slate-300">·</span>
+            <button
+              type="button"
+              onClick={() => setActiveTab('activity')}
+              className="hidden sm:inline hover:text-slate-900 font-mono tabular-nums transition-colors whitespace-nowrap"
+            >
+              {activities.length} audit events
+            </button>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                setMobileShellMode((prev) => {
+                  const next = !prev;
+                  triggerToast(
+                    next
+                      ? 'Switched to Mobile Handset Preview'
+                      : 'Switched to Full Responsive Split View'
+                  );
+                  return next;
+                });
+              }}
+              className="hidden md:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold text-slate-600 hover:text-slate-900 hover:bg-slate-200/60 transition-colors whitespace-nowrap"
+            >
+              {mobileShellMode ? (
+                <>
+                  <Monitor className="w-3.5 h-3.5 text-sky-600" />
+                  <span>Desktop Split View</span>
+                </>
+              ) : (
+                <>
+                  <Smartphone className="w-3.5 h-3.5 text-sky-600" />
+                  <span>Handset Preview</span>
+                </>
+              )}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setPwaModalOpen(true)}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold text-slate-600 hover:text-slate-900 hover:bg-slate-200/60 transition-colors whitespace-nowrap"
+            >
+              <Smartphone className="w-3.5 h-3.5 text-sky-600" />
+              <span>{isInstalled ? 'App Mode' : 'Mobile App'}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setAuthModalOpen(true)}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white border border-slate-200/90 hover:border-slate-300 text-xs font-semibold text-slate-800 transition-colors whitespace-nowrap"
+            >
+              <ShieldCheck className="w-3.5 h-3.5 text-sky-600" />
+              <span>
+                {currentUser ? `${currentUser.displayName} · ${currentUser.role.toUpperCase()}` : 'Sign In'}
+              </span>
+            </button>
+          </div>
+        </div>
+
         <div
           className={
             mobileShellMode
-              ? 'space-y-5'
-              : 'grid grid-cols-1 lg:grid-cols-12 gap-8 items-start'
+              ? 'space-y-4'
+              : 'grid grid-cols-1 lg:grid-cols-12 gap-5 sm:gap-6 xl:gap-8 items-start'
           }
         >
           {/* Primary Column */}
-          <div className={mobileShellMode ? 'w-full space-y-4' : 'lg:col-span-8 space-y-5'}>
+          <div className={mobileShellMode ? 'w-full space-y-4' : 'lg:col-span-8 space-y-6 min-w-0'}>
             <ActiveTransfersTray
               transfers={activeTransfers}
               onDismiss={dismissTransfer}
@@ -1359,95 +1765,105 @@ export default function App() {
                   {/* Search & Multi-Facet Discovery Panel */}
                   <section
                     aria-label="Search and filter files"
-                    className="bg-white rounded-3xl border border-slate-200/90 p-5 sm:p-6 space-y-5"
+                    className="bg-white rounded-3xl border border-slate-200/90 p-4 sm:p-6 space-y-4 sm:space-y-5"
                   >
                     <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-3">
                       <div>
-                        <h1 className="text-2xl sm:text-3xl font-bold text-slate-900 tracking-tight">
+                        <h1 className="text-xl sm:text-3xl font-bold text-slate-900 tracking-tight">
                           Categorized File Vault
                         </h1>
-                        <p className="text-xs text-slate-500 mt-1">
+                        <p className="text-xs text-slate-500 mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
                           <span>Room {roomCode}</span>
-                          <span className="mx-1.5" aria-hidden="true">·</span>
+                          <span aria-hidden="true">·</span>
                           <span className="font-mono tabular-nums">{files.length} shared files</span>
-                          <span className="mx-1.5" aria-hidden="true">·</span>
+                          {pinnedCount > 0 && (
+                            <>
+                              <span aria-hidden="true">·</span>
+                              <span className="font-mono tabular-nums text-amber-700 font-semibold">
+                                {pinnedCount} pinned to top
+                              </span>
+                            </>
+                          )}
+                          <span aria-hidden="true">·</span>
                           <span className="font-mono tabular-nums">{formatBytes(totalVaultSize)} total</span>
                         </p>
                       </div>
 
-                      <div className="flex items-center gap-2 self-start sm:self-auto">
-                        <button
-                          type="button"
-                          onClick={handleRefreshVault}
-                          title="Sync vault with room peers"
-                          aria-label="Sync vault with room peers"
-                          className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 interactive-press"
-                        >
-                          <RefreshCw
-                            className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin text-sky-600' : ''}`}
-                          />
-                        </button>
+                      <div className="flex flex-wrap items-center gap-1.5 sm:gap-2 self-start sm:self-auto w-full sm:w-auto justify-between sm:justify-end">
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={handleRefreshVault}
+                            title="Sync vault with room peers"
+                            aria-label="Sync vault with room peers"
+                            className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 interactive-press"
+                          >
+                            <RefreshCw
+                              className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin text-sky-600' : ''}`}
+                            />
+                          </button>
 
-                        <button
-                          type="button"
-                          onClick={async () => {
-                            const url = `${window.location.origin}/?room=${encodeURIComponent(roomCode)}`;
-                            if (navigator.share) {
-                              try {
-                                await navigator.share({
-                                  title: `RelayDrop Room ${roomCode}`,
-                                  text: `Join RelayDrop Room ${roomCode} to share & categorize files:`,
-                                  url,
-                                });
-                                return;
-                              } catch {
-                                // Fallback to clipboard
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              const url = `${window.location.origin}/?room=${encodeURIComponent(roomCode)}`;
+                              if (navigator.share) {
+                                try {
+                                  await navigator.share({
+                                    title: `RelayDrop Room ${roomCode}`,
+                                    text: `Join RelayDrop Room ${roomCode} to share & categorize files:`,
+                                    url,
+                                  });
+                                  return;
+                                } catch {
+                                  // Fallback to clipboard
+                                }
                               }
-                            }
-                            handleCopyRoomCode();
-                            triggerToast(`Copied Room ${roomCode} link`);
-                          }}
-                          title="Share Room via Mobile Share Sheet"
-                          aria-label="Share Room"
-                          className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 interactive-press"
-                        >
-                          <Share2 className="w-3.5 h-3.5 text-sky-600" />
-                        </button>
+                              handleCopyRoomCode();
+                              triggerToast(`Copied Room ${roomCode} link`);
+                            }}
+                            title="Share Room via Mobile Share Sheet"
+                            aria-label="Share Room"
+                            className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 interactive-press"
+                          >
+                            <Share2 className="w-3.5 h-3.5 text-sky-600" />
+                          </button>
 
-                        {/* View Mode Switcher: Tap List vs. Visual Grid */}
-                        <div
-                          role="group"
-                          aria-label="Vault display layout"
-                          className="flex items-center bg-slate-100 p-1 rounded-xl"
-                        >
-                          <button
-                            type="button"
-                            onClick={() => setVaultViewMode('list')}
-                            title="Compact List View"
-                            aria-label="Compact List View"
-                            className={`min-h-[32px] px-2.5 py-1 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all ${
-                              vaultViewMode === 'list'
-                                ? 'bg-white text-slate-900 shadow-xs'
-                                : 'text-slate-600 hover:text-slate-900'
-                            }`}
+                          {/* View Mode Switcher: Tap List vs. Visual Grid */}
+                          <div
+                            role="group"
+                            aria-label="Vault display layout"
+                            className="flex items-center bg-slate-100 p-1 rounded-xl"
                           >
-                            <LayoutList className="w-3.5 h-3.5" />
-                            <span className="hidden sm:inline">List</span>
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setVaultViewMode('grid')}
-                            title="Visual Preview Grid"
-                            aria-label="Visual Preview Grid"
-                            className={`min-h-[32px] px-2.5 py-1 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all ${
-                              vaultViewMode === 'grid'
-                                ? 'bg-white text-slate-900 shadow-xs'
-                                : 'text-slate-600 hover:text-slate-900'
-                            }`}
-                          >
-                            <LayoutGrid className="w-3.5 h-3.5" />
-                            <span className="hidden sm:inline">Grid</span>
-                          </button>
+                            <button
+                              type="button"
+                              onClick={() => setVaultViewMode('list')}
+                              title="Compact List View"
+                              aria-label="Compact List View"
+                              className={`min-h-[32px] px-2.5 py-1 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all ${
+                                vaultViewMode === 'list'
+                                  ? 'bg-white text-slate-900 shadow-xs'
+                                  : 'text-slate-600 hover:text-slate-900'
+                              }`}
+                            >
+                              <LayoutList className="w-3.5 h-3.5" />
+                              <span className="hidden xs:inline sm:inline">List</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setVaultViewMode('grid')}
+                              title="Visual Preview Grid"
+                              aria-label="Visual Preview Grid"
+                              className={`min-h-[32px] px-2.5 py-1 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all ${
+                                vaultViewMode === 'grid'
+                                  ? 'bg-white text-slate-900 shadow-xs'
+                                  : 'text-slate-600 hover:text-slate-900'
+                              }`}
+                            >
+                              <LayoutGrid className="w-3.5 h-3.5" />
+                              <span className="hidden xs:inline sm:inline">Grid</span>
+                            </button>
+                          </div>
                         </div>
 
                         <div className="flex items-center gap-1.5">
@@ -1459,7 +1875,7 @@ export default function App() {
                             id="vault-sort-select"
                             value={sortBy}
                             onChange={(e) => setSortBy(e.target.value as SortOption)}
-                            className="min-h-[40px] px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200/70 text-xs font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-600 transition-colors"
+                            className="min-h-[40px] px-2.5 sm:px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200/70 text-xs font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-600 transition-colors"
                           >
                             <option value="newest">Newest Date</option>
                             <option value="oldest">Oldest Date</option>
@@ -1472,11 +1888,11 @@ export default function App() {
 
                     {/* Horizontal Vault Storage Progress Bar (Soft Limit) */}
                     <div className="pt-3 border-t border-slate-100 space-y-1.5">
-                      <div className="flex items-center justify-between text-xs">
+                      <div className="flex flex-wrap items-center justify-between gap-1 text-xs">
                         <div className="flex items-center gap-1.5 text-slate-600">
                           <span className="font-semibold text-slate-900">Vault Capacity</span>
-                          <span aria-hidden="true">·</span>
-                          <span>
+                          <span className="hidden sm:inline" aria-hidden="true">·</span>
+                          <span className="hidden sm:inline">
                             {storageUsagePercent >= 100
                               ? 'Soft limit reached (uploads remain open)'
                               : storageUsagePercent >= 75
@@ -1523,9 +1939,9 @@ export default function App() {
                           type="search"
                           value={searchQuery}
                           onChange={(e) => setSearchQuery(e.target.value)}
-                          placeholder="Search by file name, category (e.g. Design Assets), or upload date (e.g. 2026-09-25)..."
+                          placeholder="Search by file name, category, or upload date (YYYY-MM-DD)..."
                           aria-label="Search files by name, category, or upload date"
-                          className="w-full min-h-[48px] pl-11 pr-14 py-2.5 rounded-2xl border border-slate-300 bg-slate-50/70 focus:bg-white text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-sky-600 transition-all"
+                          className="w-full min-h-[48px] pl-11 pr-12 py-2.5 rounded-2xl border border-slate-300 bg-slate-50/70 focus:bg-white text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-sky-600 transition-all"
                         />
                         {searchQuery ? (
                           <button
@@ -1546,50 +1962,70 @@ export default function App() {
                         )}
                       </div>
 
-                      {/* Quick Search Sample Triggers (Functional Filter Buttons) */}
-                      <div className="flex items-center gap-1.5 overflow-x-auto pb-1 text-xs">
-                        <span className="text-slate-400 shrink-0 mr-1">Quick search:</span>
+                      {/* Editorial Inline Search Suggestions */}
+                      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-500 px-1">
+                        <span className="text-slate-400">Quick filter:</span>
                         {[
-                          { label: 'Name: "nordic"', query: 'nordic' },
-                          { label: 'Category: "Design Assets"', query: 'Design Assets' },
-                          { label: 'Category: "Documents"', query: 'Documents' },
-                          { label: 'Date: "2026-09-25"', query: '2026-09-25' },
-                          { label: 'Date: "Sep 26"', query: 'Sep 26' },
-                        ].map((sample) => (
-                          <button
-                            key={sample.query}
-                            type="button"
-                            onClick={() =>
-                              setSearchQuery((prev) =>
-                                prev === sample.query ? '' : sample.query
-                              )
-                            }
-                            className={`min-h-[36px] px-2.5 py-1 rounded-lg text-xs font-medium whitespace-nowrap shrink-0 interactive-press ${
-                              searchQuery === sample.query
-                                ? 'bg-sky-600 text-white'
-                                : 'bg-slate-100 text-slate-600 hover:bg-slate-200 hover:text-slate-900'
-                            }`}
-                          >
-                            {sample.label}
-                          </button>
+                          { label: 'nordic', query: 'nordic' },
+                          { label: 'Design Assets', query: 'Design Assets' },
+                          { label: 'Documents', query: 'Documents' },
+                          { label: '2026-09-25', query: '2026-09-25' },
+                        ].map((sample, idx) => (
+                          <React.Fragment key={sample.query}>
+                            {idx > 0 && <span aria-hidden="true" className="text-slate-300">·</span>}
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setSearchQuery((prev) =>
+                                  prev === sample.query ? '' : sample.query
+                                )
+                              }
+                              className={`font-medium transition-colors whitespace-nowrap ${
+                                searchQuery === sample.query
+                                  ? 'text-sky-600 font-semibold underline underline-offset-4'
+                                  : 'text-slate-600 hover:text-slate-900 hover:underline underline-offset-4'
+                              }`}
+                            >
+                              {sample.label}
+                            </button>
+                          </React.Fragment>
                         ))}
                       </div>
                     </div>
 
-                    {/* Category Filter Controls + Add Custom Category */}
-                    <div className="space-y-2 pt-2 border-t border-slate-100">
-                      <div className="flex items-center justify-between">
+                    {/* Category Filter Segmented Bar + Add Custom Category + Mobile Date Filter Toggle */}
+                    <div className="space-y-2.5 pt-3 border-t border-slate-100">
+                      <div className="flex items-center justify-between gap-2">
                         <span className="text-xs font-semibold text-slate-700">
-                          Filter by Category
+                          Category
                         </span>
-                        <button
-                          type="button"
-                          onClick={() => setShowAddCategoryInline((v) => !v)}
-                          className="min-h-[36px] px-2 text-xs font-semibold text-sky-700 hover:text-sky-800 flex items-center gap-1 whitespace-nowrap"
-                        >
-                          <FolderPlus className="w-3.5 h-3.5" />
-                          <span>{showAddCategoryInline ? 'Close' : 'New Category'}</span>
-                        </button>
+                        <div className="flex items-center gap-3">
+                          <button
+                            type="button"
+                            onClick={() => setMobileFiltersExpanded((v) => !v)}
+                            className={`sm:hidden text-xs font-semibold flex items-center gap-1 whitespace-nowrap ${
+                              datePreset !== 'all' || Boolean(customDateFilter) || mobileFiltersExpanded
+                                ? 'text-sky-700'
+                                : 'text-slate-600 hover:text-slate-900'
+                            }`}
+                          >
+                            <Calendar className="w-3.5 h-3.5 text-sky-600" />
+                            <span>
+                              {datePreset !== 'all' || customDateFilter
+                                ? 'Date Active'
+                                : 'Filter by Date'}
+                            </span>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => setShowAddCategoryInline((v) => !v)}
+                            className="text-xs font-semibold text-sky-700 hover:text-sky-800 flex items-center gap-1 whitespace-nowrap"
+                          >
+                            <FolderPlus className="w-3.5 h-3.5" />
+                            <span>{showAddCategoryInline ? 'Close' : 'New Category'}</span>
+                          </button>
+                        </div>
                       </div>
 
                       <AnimatePresence>
@@ -1619,7 +2055,7 @@ export default function App() {
                         )}
                       </AnimatePresence>
 
-                      <div className="flex items-center gap-1.5 overflow-x-auto pb-1">
+                      <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-xl overflow-x-auto no-scrollbar">
                         {['All', ...categories].map((cat) => {
                           const active = selectedCategory === cat;
                           const count = categoryCounts[cat] ?? 0;
@@ -1628,19 +2064,19 @@ export default function App() {
                               key={cat}
                               type="button"
                               onClick={() => setSelectedCategory(cat)}
-                              className={`min-h-[44px] px-3.5 py-2 rounded-xl text-xs font-semibold whitespace-nowrap shrink-0 flex items-center gap-1.5 interactive-press ${
+                              className={`min-h-[38px] px-3.5 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap shrink-0 flex items-center gap-1.5 transition-colors interactive-press ${
                                 active
-                                  ? 'bg-slate-900 text-white'
-                                  : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                                  ? 'bg-white text-slate-900 shadow-xs'
+                                  : 'text-slate-600 hover:text-slate-900'
                               }`}
                             >
                               <span>{cat}</span>
                               <span
                                 className={`font-mono tabular-nums text-[11px] ${
-                                  active ? 'text-sky-300' : 'text-slate-400'
+                                  active ? 'text-sky-600' : 'text-slate-400'
                                 }`}
                               >
-                                ({count})
+                                {count}
                               </span>
                             </button>
                           );
@@ -1648,10 +2084,15 @@ export default function App() {
                       </div>
                     </div>
 
-                    {/* Upload Date Filter Bar (Presets + Exact Date Picker) */}
-                    <div className="pt-2 border-t border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                      <div className="flex items-center gap-1.5 overflow-x-auto">
-                        <Calendar className="w-3.5 h-3.5 text-slate-400 shrink-0 mr-1" />
+                    {/* Upload Date Filter Bar (Always visible on sm+, or when toggled / active on mobile) */}
+                    <div
+                      className={`${
+                        mobileFiltersExpanded || datePreset !== 'all' || Boolean(customDateFilter)
+                          ? 'flex'
+                          : 'hidden sm:flex'
+                      } pt-2.5 border-t border-slate-100 flex-col sm:flex-row sm:items-center justify-between gap-3`}
+                    >
+                      <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-xl overflow-x-auto no-scrollbar">
                         {(
                           [
                             { id: 'all', label: 'All Dates' },
@@ -1667,10 +2108,10 @@ export default function App() {
                               setDatePreset(preset.id);
                               setCustomDateFilter('');
                             }}
-                            className={`min-h-[40px] px-3 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap shrink-0 interactive-press ${
+                            className={`min-h-[34px] px-3 py-1 rounded-lg text-xs font-semibold whitespace-nowrap shrink-0 transition-colors interactive-press ${
                               datePreset === preset.id && !customDateFilter
-                                ? 'bg-sky-600 text-white'
-                                : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                                ? 'bg-white text-slate-900 shadow-xs'
+                                : 'text-slate-600 hover:text-slate-900'
                             }`}
                           >
                             {preset.label}
@@ -1678,7 +2119,7 @@ export default function App() {
                         ))}
                       </div>
 
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center justify-between sm:justify-end gap-2">
                         <label htmlFor="exact-date-filter" className="text-xs text-slate-500 whitespace-nowrap">
                           Exact Date:
                         </label>
@@ -1712,7 +2153,33 @@ export default function App() {
                             )}
                           </p>
 
-                          <div className="flex items-center gap-2">
+                          <div className="flex flex-wrap items-center gap-2">
+                            {pinnedCount > 0 && (
+                              <button
+                                type="button"
+                                onClick={() => setShowPinnedOnly((prev) => !prev)}
+                                title={
+                                  showPinnedOnly
+                                    ? 'Show all files (pinned still at top)'
+                                    : 'Show only pinned files'
+                                }
+                                className={`min-h-[38px] px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap interactive-press ${
+                                  showPinnedOnly
+                                    ? 'bg-amber-500 text-white'
+                                    : 'bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-200/80'
+                                }`}
+                              >
+                                <Pin
+                                  className={`w-3.5 h-3.5 -rotate-45 ${
+                                    showPinnedOnly ? 'fill-white text-white' : 'fill-amber-600 text-amber-600'
+                                  }`}
+                                />
+                                <span>
+                                  {showPinnedOnly ? `Pinned Only (${pinnedCount})` : `Pinned (${pinnedCount})`}
+                                </span>
+                              </button>
+                            )}
+
                             {hasActiveFilters && (
                               <button
                                 type="button"
@@ -1724,26 +2191,39 @@ export default function App() {
                             )}
 
                             {filteredResults.length > 0 && (
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  if (!currentUser || currentUser.role === 'viewer') {
-                                    triggerToast(
-                                      currentUser
-                                        ? 'Viewer role is read-only. Switch to Editor or Admin for bulk delete.'
-                                        : 'Sign in required to select and bulk delete files.'
-                                    );
-                                    setAuthModalOpen(true);
-                                    return;
-                                  }
-                                  setIsMultiSelectMode(true);
-                                  setCheckedFileIds([]);
-                                }}
-                                className="min-h-[38px] px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap interactive-press"
-                              >
-                                <CheckSquare className="w-3.5 h-3.5 text-sky-600" />
-                                <span>Select Files</span>
-                              </button>
+                              <>
+                                <button
+                                  type="button"
+                                  onClick={handleExportVisibleFilesToCsv}
+                                  aria-label="Export all visible files metadata to CSV"
+                                  title="Download CSV metadata for all currently visible files"
+                                  className="min-h-[38px] px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap interactive-press"
+                                >
+                                  <FileSpreadsheet className="w-3.5 h-3.5 text-teal-600" />
+                                  <span>Export All to CSV</span>
+                                </button>
+
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    if (!currentUser || currentUser.role === 'viewer') {
+                                      triggerToast(
+                                        currentUser
+                                          ? 'Viewer role is read-only. Switch to Editor or Admin for bulk delete.'
+                                          : 'Sign in required to select and bulk delete files.'
+                                      );
+                                      setAuthModalOpen(true);
+                                      return;
+                                    }
+                                    setIsMultiSelectMode(true);
+                                    setCheckedFileIds([]);
+                                  }}
+                                  className="min-h-[38px] px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap interactive-press"
+                                >
+                                  <CheckSquare className="w-3.5 h-3.5 text-sky-600" />
+                                  <span>Select Files</span>
+                                </button>
+                              </>
                             )}
                           </div>
                         </>
@@ -1803,7 +2283,17 @@ export default function App() {
                             </span>
                           </div>
 
-                          <div className="flex items-center gap-2">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <button
+                              type="button"
+                              disabled={checkedFileIds.length === 0}
+                              onClick={() => handleBulkTogglePin(true)}
+                              className="min-h-[38px] px-3 py-1.5 rounded-xl bg-amber-50 hover:bg-amber-100 border border-amber-200 disabled:bg-slate-100 disabled:border-slate-200 disabled:text-slate-400 text-amber-900 text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap interactive-press"
+                            >
+                              <Pin className="w-3.5 h-3.5 -rotate-45 fill-amber-600 text-amber-600" />
+                              <span>Pin to Top</span>
+                            </button>
+
                             <button
                               type="button"
                               disabled={checkedFileIds.length === 0}
@@ -1902,99 +2392,112 @@ export default function App() {
                                   }
                                 }
                               }}
-                              className={`group min-h-[68px] px-4 sm:px-5 py-3.5 transition-colors flex items-center justify-between gap-3.5 cursor-pointer ${
+                              className={`group min-h-[68px] px-3.5 sm:px-5 py-3.5 transition-colors flex flex-col sm:flex-row sm:items-center justify-between gap-3 cursor-pointer ${
                                 isMultiSelectMode && isChecked
                                   ? 'bg-sky-50/80 hover:bg-sky-100/70'
+                                  : file.pinned
+                                  ? 'bg-amber-50/35 hover:bg-amber-50/65 border-l-2 border-l-amber-500'
                                   : 'hover:bg-slate-50/90 active:bg-slate-100/80'
                               }`}
                             >
-                              {/* Multi-select Checkbox Affordance */}
-                              {isMultiSelectMode && (
-                                <button
-                                  type="button"
-                                  role="checkbox"
-                                  aria-checked={isChecked}
-                                  aria-label={`Select ${file.name}`}
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    handleToggleCheckFile(file.id);
-                                  }}
-                                  className={`w-6 h-6 rounded-lg border flex items-center justify-center shrink-0 transition-colors ${
-                                    isChecked
-                                      ? 'bg-sky-600 border-sky-600 text-white'
-                                      : 'bg-white border-slate-300 text-transparent hover:border-sky-500'
-                                  }`}
-                                >
-                                  <Check className="w-3.5 h-3.5" />
-                                </button>
-                              )}
+                              <div className="flex items-center gap-3 min-w-0 flex-1">
+                                {/* Multi-select Checkbox Affordance */}
+                                {isMultiSelectMode && (
+                                  <button
+                                    type="button"
+                                    role="checkbox"
+                                    aria-checked={isChecked}
+                                    aria-label={`Select ${file.name}`}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handleToggleCheckFile(file.id);
+                                    }}
+                                    className={`w-6 h-6 rounded-lg border flex items-center justify-center shrink-0 transition-colors ${
+                                      isChecked
+                                        ? 'bg-sky-600 border-sky-600 text-white'
+                                        : 'bg-white border-slate-300 text-transparent hover:border-sky-500'
+                                    }`}
+                                  >
+                                    <Check className="w-3.5 h-3.5" />
+                                  </button>
+                                )}
 
-                              {/* Left 44px Thumbnail or Category Icon Container */}
-                              {imgPreview.isImage && imgPreview.src && !file.pinProtected ? (
-                                <div className="w-11 h-11 rounded-xl bg-slate-900 overflow-hidden shrink-0 border border-slate-200/80 relative">
-                                  <img
-                                    src={imgPreview.src}
-                                    alt={file.name}
-                                    referrerPolicy="no-referrer"
-                                    className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-200"
-                                  />
-                                </div>
-                              ) : (
-                                <div className="w-11 h-11 rounded-xl bg-slate-100 group-hover:bg-slate-200/70 transition-colors flex items-center justify-center shrink-0">
-                                  {getCategoryIcon(file.category)}
-                                </div>
-                              )}
-
-                              {/* Middle Stacked Title & Clean Unboxed Metadata */}
-                              <div className="min-w-0 flex-1">
-                                <div className="flex items-center gap-2">
-                                  <p className="text-sm font-semibold text-slate-900 group-hover:text-sky-700 transition-colors truncate">
-                                    {file.name}
-                                  </p>
-                                  {file.pinProtected && (
-                                    <Lock
-                                      className="w-3.5 h-3.5 text-amber-600 shrink-0"
-                                      aria-label="PIN Protected"
+                                {/* Left 44px Thumbnail or Category Icon Container */}
+                                {imgPreview.isImage && imgPreview.src && !file.pinProtected ? (
+                                  <div className="w-11 h-11 rounded-xl bg-slate-900 overflow-hidden shrink-0 border border-slate-200/80 relative">
+                                    <img
+                                      src={imgPreview.src}
+                                      alt={file.name}
+                                      referrerPolicy="no-referrer"
+                                      className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-200"
                                     />
-                                  )}
-                                </div>
+                                  </div>
+                                ) : (
+                                  <div className="w-11 h-11 rounded-xl bg-slate-100 group-hover:bg-slate-200/70 transition-colors flex items-center justify-center shrink-0">
+                                    {getCategoryIcon(file.category)}
+                                  </div>
+                                )}
 
-                                {/* Zero-Pill Metadata Discipline: Clean unboxed text with subtle · separators */}
-                                <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs text-slate-500 mt-0.5">
-                                  <span className="font-semibold text-slate-700">{file.category}</span>
-                                  <span aria-hidden="true">·</span>
-                                  <span className="font-mono tabular-nums">{formatBytes(file.size)}</span>
-                                  <span aria-hidden="true">·</span>
-                                  <span className="font-mono tabular-nums">
-                                    {formatDisplayDate(file.uploadDate)}
-                                  </span>
-                                  {(imgPreview.isImage || Boolean(textSnippet)) && !file.pinProtected && (
-                                    <>
-                                      <span aria-hidden="true">·</span>
-                                      <span className="font-mono text-[11px] text-sky-700">
-                                        {imgPreview.isImage ? `${imgPreview.formatBadge} Preview` : 'Text/JSON Viewer'}
+                                {/* Middle Stacked Title & Clean Unboxed Metadata */}
+                                <div className="min-w-0 flex-1">
+                                  <div className="flex items-center gap-2">
+                                    <p className="text-sm font-semibold text-slate-900 group-hover:text-sky-700 transition-colors truncate">
+                                      {file.name}
+                                    </p>
+                                    {file.pinned && (
+                                      <span
+                                        title="Pinned to top of vault"
+                                        className="inline-flex items-center gap-1 text-[11px] font-semibold text-amber-700 shrink-0"
+                                      >
+                                        <Pin className="w-3 h-3 fill-amber-600 text-amber-600 -rotate-45" />
+                                        <span>Pinned</span>
                                       </span>
-                                    </>
-                                  )}
-                                  <span className="hidden md:inline" aria-hidden="true">·</span>
-                                  <span className="hidden md:inline truncate">
-                                    {file.senderName}
-                                  </span>
-                                  {matchedBy.length > 0 && (
-                                    <>
-                                      <span aria-hidden="true">·</span>
-                                      <span className="text-sky-700 font-semibold">
-                                        Matched {matchedBy.join(' & ')}
-                                      </span>
-                                    </>
-                                  )}
+                                    )}
+                                    {file.pinProtected && (
+                                      <Lock
+                                        className="w-3.5 h-3.5 text-amber-600 shrink-0"
+                                        aria-label="PIN Protected"
+                                      />
+                                    )}
+                                  </div>
+
+                                  {/* Zero-Pill Metadata Discipline: Clean unboxed text with subtle · separators */}
+                                  <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs text-slate-500 mt-0.5">
+                                    <span className="font-semibold text-slate-700">{file.category}</span>
+                                    <span aria-hidden="true">·</span>
+                                    <span className="font-mono tabular-nums">{formatBytes(file.size)}</span>
+                                    <span aria-hidden="true">·</span>
+                                    <span className="font-mono tabular-nums">
+                                      {formatDisplayDate(file.uploadDate)}
+                                    </span>
+                                    {(imgPreview.isImage || Boolean(textSnippet)) && !file.pinProtected && (
+                                      <>
+                                        <span aria-hidden="true">·</span>
+                                        <span className="font-mono text-[11px] text-sky-700">
+                                          {imgPreview.isImage ? `${imgPreview.formatBadge} Preview` : 'Text/JSON Viewer'}
+                                        </span>
+                                      </>
+                                    )}
+                                    <span className="hidden md:inline" aria-hidden="true">·</span>
+                                    <span className="hidden md:inline truncate">
+                                      {file.senderName}
+                                    </span>
+                                    {matchedBy.length > 0 && (
+                                      <>
+                                        <span aria-hidden="true">·</span>
+                                        <span className="text-sky-700 font-semibold">
+                                          Matched {matchedBy.join(' & ')}
+                                        </span>
+                                      </>
+                                    )}
+                                  </div>
                                 </div>
                               </div>
 
-                              {/* Right Quick Category Selector + Action Affordance */}
+                              {/* Right Quick Category Selector + Action Affordance (Responsive across mobile & desktop) */}
                               {!isMultiSelectMode && (
                                 <div
-                                  className="flex items-center gap-1.5 shrink-0"
+                                  className="w-full sm:w-auto pt-2.5 sm:pt-0 mt-1 sm:mt-0 border-t border-slate-100 sm:border-t-0 flex items-center justify-between sm:justify-end gap-1.5 shrink-0"
                                   onClick={(e) => e.stopPropagation()}
                                 >
                                   <select
@@ -2004,7 +2507,7 @@ export default function App() {
                                     onChange={(e) =>
                                       handleUpdateFile(file.id, { category: e.target.value })
                                     }
-                                    className="hidden sm:block min-h-[40px] px-2.5 py-1.5 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 disabled:opacity-60 text-xs font-semibold text-slate-700 focus:outline-none focus:ring-2 focus:ring-sky-600 transition-colors"
+                                    className="min-h-[38px] sm:min-h-[40px] flex-1 sm:flex-initial max-w-[165px] sm:max-w-none px-2.5 py-1.5 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 disabled:opacity-60 text-xs font-semibold text-slate-700 focus:outline-none focus:ring-2 focus:ring-sky-600 transition-colors"
                                   >
                                     {categories.map((cat) => (
                                       <option key={cat} value={cat}>
@@ -2013,35 +2516,73 @@ export default function App() {
                                     ))}
                                   </select>
 
-                                  {!file.pinProtected ? (
+                                  <div className="flex items-center gap-1">
                                     <button
                                       type="button"
-                                      onClick={() => handleDownloadFile(file)}
-                                      aria-label={`Download ${file.name}`}
-                                      title={`Download ${file.name} (${formatBytes(file.size)})`}
-                                      className="min-h-[44px] min-w-[44px] flex items-center justify-center rounded-xl text-slate-600 hover:text-sky-600 hover:bg-sky-50 transition-colors interactive-press"
+                                      onClick={() => handleTogglePinFile(file)}
+                                      aria-label={
+                                        file.pinned
+                                          ? `Unpin ${file.name} from top`
+                                          : `Pin ${file.name} to top`
+                                      }
+                                      title={
+                                        file.pinned
+                                          ? `Unpin "${file.name}" from top`
+                                          : `Pin "${file.name}" to top of list/grid`
+                                      }
+                                      className={`min-h-[40px] min-w-[40px] sm:min-h-[42px] sm:min-w-[42px] flex items-center justify-center rounded-xl transition-colors interactive-press ${
+                                        file.pinned
+                                          ? 'text-amber-600 bg-amber-50 hover:bg-amber-100'
+                                          : 'text-slate-400 hover:text-amber-600 hover:bg-amber-50'
+                                      }`}
                                     >
-                                      <Download className="w-4 h-4" />
+                                      <Pin
+                                        className={`w-4 h-4 -rotate-45 ${
+                                          file.pinned ? 'fill-amber-600 text-amber-600' : ''
+                                        }`}
+                                      />
                                     </button>
-                                  ) : (
+
+                                    <button
+                                      type="button"
+                                      onClick={() => setQrModalFileId(file.id)}
+                                      aria-label={`Generate QR code for ${file.name}`}
+                                      title={`Generate & download QR code for ${file.name}`}
+                                      className="min-h-[40px] min-w-[40px] sm:min-h-[42px] sm:min-w-[42px] flex items-center justify-center rounded-xl text-slate-600 hover:text-sky-600 hover:bg-sky-50 transition-colors interactive-press"
+                                    >
+                                      <QrCode className="w-4 h-4" />
+                                    </button>
+
+                                    {!file.pinProtected ? (
+                                      <button
+                                        type="button"
+                                        onClick={() => handleDownloadFile(file)}
+                                        aria-label={`Download ${file.name}`}
+                                        title={`Download ${file.name} (${formatBytes(file.size)})`}
+                                        className="min-h-[40px] min-w-[40px] sm:min-h-[42px] sm:min-w-[42px] flex items-center justify-center rounded-xl text-slate-600 hover:text-sky-600 hover:bg-sky-50 transition-colors interactive-press"
+                                      >
+                                        <Download className="w-4 h-4" />
+                                      </button>
+                                    ) : (
+                                      <button
+                                        type="button"
+                                        onClick={() => setSelectedFileId(file.id)}
+                                        aria-label={`Unlock and download ${file.name}`}
+                                        className="min-h-[40px] min-w-[40px] sm:min-h-[42px] sm:min-w-[42px] flex items-center justify-center rounded-xl text-amber-600 hover:bg-amber-50 transition-colors"
+                                      >
+                                        <Lock className="w-4 h-4" />
+                                      </button>
+                                    )}
+
                                     <button
                                       type="button"
                                       onClick={() => setSelectedFileId(file.id)}
-                                      aria-label={`Unlock and download ${file.name}`}
-                                      className="min-h-[44px] min-w-[44px] flex items-center justify-center rounded-xl text-amber-600 hover:bg-amber-50 transition-colors"
+                                      aria-label={`Inspect ${file.name}`}
+                                      className="min-h-[40px] min-w-[40px] sm:min-h-[42px] sm:min-w-[42px] flex items-center justify-center rounded-xl text-slate-400 group-hover:text-slate-900 transition-colors"
                                     >
-                                      <Lock className="w-4 h-4" />
+                                      <ChevronRight className="w-4 h-4 group-hover:translate-x-0.5 transition-transform" />
                                     </button>
-                                  )}
-
-                                  <button
-                                    type="button"
-                                    onClick={() => setSelectedFileId(file.id)}
-                                    aria-label={`Inspect ${file.name}`}
-                                    className="min-h-[44px] min-w-[44px] flex items-center justify-center rounded-xl text-slate-400 group-hover:text-slate-900 transition-colors"
-                                  >
-                                    <ChevronRight className="w-4 h-4 group-hover:translate-x-0.5 transition-transform" />
-                                  </button>
+                                  </div>
                                 </div>
                               )}
                             </div>
@@ -2050,7 +2591,11 @@ export default function App() {
                       </div>
                     ) : (
                       /* Visual Grid View: Rich Image & Code/JSON Cards */
-                      <div className="p-5 grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <div
+                        className={`p-4 sm:p-5 grid grid-cols-1 sm:grid-cols-2 ${
+                          mobileShellMode ? '' : 'xl:grid-cols-3'
+                        } gap-4`}
+                      >
                         {filteredResults.map(({ file, matchedBy }) => {
                           const isChecked = checkedFileIds.includes(file.id);
                           const imgPreview = resolveImageSource(file);
@@ -2081,11 +2626,42 @@ export default function App() {
                               className={`group rounded-2xl border overflow-hidden flex flex-col justify-between cursor-pointer transition-all ${
                                 isMultiSelectMode && isChecked
                                   ? 'border-sky-600 bg-sky-50/40'
+                                  : file.pinned
+                                  ? 'border-amber-300 hover:border-amber-400 bg-amber-50/15 ring-1 ring-amber-400/20'
                                   : 'border-slate-200/90 hover:border-slate-300 bg-white'
                               }`}
                             >
                               {/* Top Visual Surface */}
                               <div className="relative h-36 bg-slate-950 overflow-hidden flex items-center justify-center">
+                                {!isMultiSelectMode && (
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handleTogglePinFile(file);
+                                    }}
+                                    aria-label={
+                                      file.pinned
+                                        ? `Unpin ${file.name} from top`
+                                        : `Pin ${file.name} to top`
+                                    }
+                                    title={
+                                      file.pinned ? 'Unpin from top' : 'Pin to top'
+                                    }
+                                    className={`absolute top-2.5 right-2.5 z-10 min-h-[32px] px-2.5 py-1 rounded-xl text-[11px] font-semibold flex items-center gap-1 backdrop-blur-md transition-all interactive-press ${
+                                      file.pinned
+                                        ? 'bg-amber-500 text-white shadow-sm'
+                                        : 'bg-slate-900/70 hover:bg-slate-900 text-white/90 border border-white/15'
+                                    }`}
+                                  >
+                                    <Pin
+                                      className={`w-3 h-3 -rotate-45 ${
+                                        file.pinned ? 'fill-white text-white' : ''
+                                      }`}
+                                    />
+                                    <span>{file.pinned ? 'Pinned' : 'Pin'}</span>
+                                  </button>
+                                )}
                                 {file.pinProtected ? (
                                   <div className="flex flex-col items-center justify-center text-amber-400 space-y-1.5 p-4 text-center">
                                     <Lock className="w-6 h-6" />
@@ -2148,9 +2724,17 @@ export default function App() {
                               {/* Card Body */}
                               <div className="p-3.5 space-y-1.5 flex-1 flex flex-col justify-between">
                                 <div>
-                                  <p className="text-sm font-semibold text-slate-900 group-hover:text-sky-700 transition-colors truncate">
-                                    {file.name}
-                                  </p>
+                                  <div className="flex items-center gap-1.5">
+                                    <p className="text-sm font-semibold text-slate-900 group-hover:text-sky-700 transition-colors truncate">
+                                      {file.name}
+                                    </p>
+                                    {file.pinned && (
+                                      <Pin
+                                        className="w-3.5 h-3.5 fill-amber-600 text-amber-600 -rotate-45 shrink-0"
+                                        aria-label="Pinned to top"
+                                      />
+                                    )}
+                                  </div>
                                   <p className="text-xs text-slate-500 mt-0.5 truncate">
                                     <span className="font-semibold text-slate-700">
                                       {file.category}
@@ -2170,11 +2754,73 @@ export default function App() {
                                   </p>
                                 </div>
 
-                                <div className="pt-2 border-t border-slate-100 flex items-center justify-between text-xs text-slate-500">
+                                <div className="pt-2 border-t border-slate-100 flex items-center justify-between gap-2 text-xs text-slate-500">
                                   <span className="truncate">{file.senderName}</span>
-                                  <span className="text-sky-700 font-semibold group-hover:underline">
-                                    Inspect →
-                                  </span>
+                                  <div
+                                    className="flex items-center gap-1 shrink-0"
+                                    onClick={(e) => e.stopPropagation()}
+                                  >
+                                    <button
+                                      type="button"
+                                      onClick={() => handleTogglePinFile(file)}
+                                      aria-label={
+                                        file.pinned
+                                          ? `Unpin ${file.name} from top`
+                                          : `Pin ${file.name} to top`
+                                      }
+                                      title={
+                                        file.pinned ? 'Unpin from top' : 'Pin to top'
+                                      }
+                                      className={`p-1.5 rounded-lg transition-colors ${
+                                        file.pinned
+                                          ? 'text-amber-600 bg-amber-50 hover:bg-amber-100'
+                                          : 'text-slate-400 hover:text-amber-600 hover:bg-amber-50'
+                                      }`}
+                                    >
+                                      <Pin
+                                        className={`w-3.5 h-3.5 -rotate-45 ${
+                                          file.pinned ? 'fill-amber-600 text-amber-600' : ''
+                                        }`}
+                                      />
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => setQrModalFileId(file.id)}
+                                      aria-label={`Generate QR code for ${file.name}`}
+                                      title={`Generate & download QR code for ${file.name}`}
+                                      className="p-1.5 rounded-lg text-slate-500 hover:text-sky-600 hover:bg-sky-50 transition-colors"
+                                    >
+                                      <QrCode className="w-3.5 h-3.5" />
+                                    </button>
+                                    {!file.pinProtected ? (
+                                      <button
+                                        type="button"
+                                        onClick={() => handleDownloadFile(file)}
+                                        aria-label={`Download ${file.name}`}
+                                        title={`Download ${file.name}`}
+                                        className="p-1.5 rounded-lg text-slate-500 hover:text-sky-600 hover:bg-sky-50 transition-colors"
+                                      >
+                                        <Download className="w-3.5 h-3.5" />
+                                      </button>
+                                    ) : (
+                                      <button
+                                        type="button"
+                                        onClick={() => setSelectedFileId(file.id)}
+                                        aria-label={`Unlock ${file.name}`}
+                                        title="Unlock PIN-protected file"
+                                        className="p-1.5 rounded-lg text-amber-600 hover:bg-amber-50 transition-colors"
+                                      >
+                                        <Lock className="w-3.5 h-3.5" />
+                                      </button>
+                                    )}
+                                    <button
+                                      type="button"
+                                      onClick={() => setSelectedFileId(file.id)}
+                                      className="pl-1 text-sky-700 font-semibold hover:underline"
+                                    >
+                                      Inspect →
+                                    </button>
+                                  </div>
                                 </div>
                               </div>
                             </div>
@@ -2211,6 +2857,24 @@ export default function App() {
                 </motion.div>
               )}
 
+              {activeTab === 'activity' && (
+                <motion.div
+                  key="tab-activity"
+                  initial={{ opacity: 0, y: 6 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -4 }}
+                  transition={{ duration: 0.16, ease: [0.16, 1, 0.3, 1] }}
+                >
+                  <ActivityLogPanel
+                    activities={activities}
+                    files={files}
+                    roomCode={roomCode}
+                    onSelectFile={(fileId) => setSelectedFileId(fileId)}
+                    onNotify={triggerToast}
+                  />
+                </motion.div>
+              )}
+
               {activeTab === 'radar' && (
                 <motion.section
                   key="tab-radar"
@@ -2229,14 +2893,24 @@ export default function App() {
                         Real-time discovery for devices paired to Room {roomCode}. Open a second mobile browser tab to see live peer presence.
                       </p>
                     </div>
-                    <button
-                      type="button"
-                      onClick={handleReceivePeerSampleDrop}
-                      className="min-h-[44px] px-4 py-2 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold flex items-center gap-2 whitespace-nowrap self-start sm:self-auto interactive-press"
-                    >
-                      <Send className="w-3.5 h-3.5" />
-                      <span>Receive Test Peer Drop</span>
-                    </button>
+                    <div className="flex flex-wrap items-center gap-2 self-start sm:self-auto">
+                      <button
+                        type="button"
+                        onClick={handleSimulateNewPeer}
+                        className="min-h-[44px] px-3.5 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap interactive-press"
+                      >
+                        <UserPlus className="w-3.5 h-3.5 text-sky-600" />
+                        <span>+ Simulate Peer</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleReceivePeerSampleDrop}
+                        className="min-h-[44px] px-4 py-2 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold flex items-center gap-2 whitespace-nowrap interactive-press"
+                      >
+                        <Send className="w-3.5 h-3.5" />
+                        <span>Receive Test Peer Drop</span>
+                      </button>
+                    </div>
                   </div>
 
                   {/* Tactile Animated Radar Visualization */}
@@ -2264,17 +2938,17 @@ export default function App() {
                   </div>
 
                   {/* Connected Peers Tap List */}
-                  <div className="space-y-2">
+                  <div className="space-y-2 pt-2 border-t border-slate-100">
                     <h3 className="text-xs font-semibold text-slate-700">
                       Connected Devices in Room {roomCode}
                     </h3>
-                    <div className="divide-y divide-slate-100 rounded-2xl border border-slate-200 overflow-hidden">
+                    <div className="divide-y divide-slate-100">
                       {peers.map((peer) => {
                         const isSelf = peer.id === peerId;
                         return (
                           <div
                             key={peer.id}
-                            className="min-h-[60px] px-4 py-3 bg-white flex items-center justify-between gap-3"
+                            className="min-h-[60px] py-3 flex items-center justify-between gap-3"
                           >
                             <div className="flex items-center gap-3 min-w-0">
                               <div className="w-9 h-9 rounded-full bg-slate-100 flex items-center justify-center shrink-0">
@@ -2346,7 +3020,7 @@ export default function App() {
                     </button>
                   </div>
 
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-6 items-center p-5 rounded-2xl bg-slate-50 border border-slate-200/80">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-6 items-center py-5 border-y border-slate-100">
                     <div className="flex flex-col items-center sm:items-start space-y-3">
                       <span className="text-xs font-semibold text-slate-500">
                         Current Pairing Code
@@ -2425,13 +3099,138 @@ export default function App() {
                       </div>
                     </div>
                   </div>
+
+                  {/* File-Specific QR Code Generator & Download for Pairing Room */}
+                  {activePairingQrFile && (
+                    <div className="pt-5 border-t border-slate-100 space-y-4">
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                        <div>
+                          <h3 className="text-sm font-bold text-slate-900 flex items-center gap-1.5">
+                            <QrCode className="w-4 h-4 text-sky-600" />
+                            <span>Generate & Download File QR Code for Room {roomCode}</span>
+                          </h3>
+                          <p className="text-xs text-slate-500 mt-0.5">
+                            Select any file in the vault to generate a scannable QR card that pairs peers to Room {roomCode} and downloads the file immediately.
+                          </p>
+                        </div>
+
+                        <select
+                          aria-label="Select file to generate QR code"
+                          value={activePairingQrFile.id}
+                          onChange={(e) => setPairingQrFileId(e.target.value)}
+                          className="min-h-[40px] px-3 py-1.5 rounded-xl border border-slate-300 bg-white text-xs font-semibold text-slate-900 focus:outline-none focus:ring-2 focus:ring-sky-600 max-w-xs"
+                        >
+                          {files.map((f) => (
+                            <option key={f.id} value={f.id}>
+                              {f.name} ({formatBytes(f.size)})
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div className="p-5 rounded-2xl bg-slate-50 border border-slate-200/80 flex flex-col sm:flex-row items-center gap-5">
+                        <div className="flex flex-col items-center shrink-0">
+                          <QrMatrixSvg
+                            value={buildFileQrPayloadUrl({
+                              fileId: activePairingQrFile.id,
+                              roomCode,
+                            })}
+                            size={148}
+                          />
+                          <span className="text-[11px] font-mono text-slate-500 mt-2">
+                            Room {roomCode} · Instant Download
+                          </span>
+                        </div>
+
+                        <div className="flex-1 space-y-3 w-full min-w-0">
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <h4 className="text-sm font-bold text-slate-900 truncate">
+                                {activePairingQrFile.name}
+                              </h4>
+                              {activePairingQrFile.pinProtected && (
+                                <Lock className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                              )}
+                            </div>
+                            <p className="text-xs text-slate-500 mt-0.5">
+                              <span className="font-semibold text-slate-700">
+                                {activePairingQrFile.category}
+                              </span>
+                              <span className="mx-1.5" aria-hidden="true">·</span>
+                              <span className="font-mono tabular-nums">
+                                {formatBytes(activePairingQrFile.size)}
+                              </span>
+                              <span className="mx-1.5" aria-hidden="true">·</span>
+                              <span>Shared by {activePairingQrFile.senderName}</span>
+                            </p>
+                          </div>
+
+                          <div className="flex flex-wrap items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={async () => {
+                                await downloadFileQrPng({
+                                  value: buildFileQrPayloadUrl({
+                                    fileId: activePairingQrFile.id,
+                                    roomCode,
+                                  }),
+                                  fileName: activePairingQrFile.name,
+                                  category: activePairingQrFile.category,
+                                  sizeLabel: formatBytes(activePairingQrFile.size),
+                                  roomCode,
+                                });
+                                triggerToast(
+                                  `Downloaded QR Code PNG for "${activePairingQrFile.name}"`
+                                );
+                              }}
+                              className="min-h-[42px] px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold flex items-center gap-2 whitespace-nowrap interactive-press"
+                            >
+                              <Download className="w-4 h-4 text-sky-400" />
+                              <span>Download QR Code (PNG)</span>
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => {
+                                downloadFileQrSvg({
+                                  value: buildFileQrPayloadUrl({
+                                    fileId: activePairingQrFile.id,
+                                    roomCode,
+                                  }),
+                                  fileName: activePairingQrFile.name,
+                                  category: activePairingQrFile.category,
+                                  sizeLabel: formatBytes(activePairingQrFile.size),
+                                  roomCode,
+                                });
+                                triggerToast(
+                                  `Downloaded QR Code SVG for "${activePairingQrFile.name}"`
+                                );
+                              }}
+                              className="min-h-[42px] px-3.5 py-2 rounded-xl bg-white hover:bg-slate-100 border border-slate-200 text-slate-800 text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap interactive-press"
+                            >
+                              <QrCode className="w-3.5 h-3.5 text-sky-600" />
+                              <span>Download SVG</span>
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => setSelectedFileId(activePairingQrFile.id)}
+                              className="min-h-[42px] px-3.5 py-2 rounded-xl bg-white hover:bg-slate-100 border border-slate-200 text-slate-700 text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap interactive-press"
+                            >
+                              <span>Inspect File</span>
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
                 </motion.section>
               )}
             </AnimatePresence>
           </div>
 
           {/* Secondary Companion Column (4 cols on Desktop Split View, or stacked below in Mobile Shell Mode) */}
-          <aside className={mobileShellMode ? 'space-y-4 pt-2' : 'lg:col-span-4 space-y-6'}>
+          <aside className={mobileShellMode ? 'space-y-4 pt-2' : 'lg:col-span-4 lg:sticky lg:top-20 space-y-6'}>
             {/* Identity & Role-Based Access Control (RBAC) Card */}
             <div className="bg-white rounded-3xl border border-slate-200/90 p-5 space-y-4">
               <div className="flex items-center justify-between gap-2">
@@ -2467,14 +3266,14 @@ export default function App() {
               </div>
 
               {currentUser ? (
-                <div className="space-y-2 pt-2 border-t border-slate-100">
-                  <div className="flex items-center justify-between text-[11px] text-slate-500">
+                <div className="space-y-2 pt-2.5 border-t border-slate-100">
+                  <div className="flex items-center justify-between text-xs text-slate-500">
                     <span>Active RBAC Role</span>
-                    <span className="font-mono uppercase text-slate-700 font-semibold">
+                    <span className="font-mono text-[11px] uppercase text-slate-700 font-semibold">
                       {currentUser.role}
                     </span>
                   </div>
-                  <div className="grid grid-cols-3 gap-1.5">
+                  <div className="grid grid-cols-3 gap-1 p-1 bg-slate-100 rounded-xl">
                     {(['admin', 'editor', 'viewer'] as UserRole[]).map((roleOption) => {
                       const active = currentUser.role === roleOption;
                       return (
@@ -2485,10 +3284,10 @@ export default function App() {
                             await handleUpdateLocalRole(roleOption);
                             triggerToast(`Role switched to ${formatRoleLabel(roleOption)}`);
                           }}
-                          className={`min-h-[36px] px-2 py-1 rounded-xl text-xs font-semibold capitalize interactive-press ${
+                          className={`min-h-[34px] px-2 py-1 rounded-lg text-xs font-semibold capitalize transition-colors interactive-press ${
                             active
-                              ? 'bg-slate-900 text-white'
-                              : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                              ? 'bg-white text-slate-900 shadow-xs'
+                              : 'text-slate-600 hover:text-slate-900'
                           }`}
                         >
                           {roleOption}
@@ -2508,6 +3307,14 @@ export default function App() {
                 </button>
               )}
             </div>
+
+            {/* Chronological Recent Activity Side-Panel Card */}
+            <ActivitySidePanelCard
+              activities={activities}
+              files={files}
+              onOpenActivityTab={() => setActiveTab('activity')}
+              onSelectFile={(fileId) => setSelectedFileId(fileId)}
+            />
 
             {/* Category Breakdown Card */}
             <div className="bg-white rounded-3xl border border-slate-200/90 p-5 space-y-4">
@@ -2628,16 +3435,17 @@ export default function App() {
         aria-label="Mobile Bottom Navigation"
         className={`${
           mobileShellMode
-            ? 'fixed bottom-0 left-1/2 -translate-x-1/2 w-full max-w-[460px] rounded-t-2xl border-x'
+            ? 'fixed bottom-0 left-1/2 -translate-x-1/2 w-full max-w-[430px] rounded-t-2xl border-x'
             : 'md:hidden fixed bottom-0 left-0 right-0'
-        } z-40 h-14 pb-safe bg-white/95 backdrop-blur-md border-t border-slate-200 grid grid-cols-4 items-center px-2 shadow-lg shadow-slate-900/5`}
+        } z-40 min-h-[56px] pb-safe bg-white/95 backdrop-blur-md border-t border-slate-200 grid grid-cols-5 items-center px-1.5 shadow-lg shadow-slate-900/5`}
       >
         {(
           [
-            { id: 'vault', label: 'Vault', icon: FolderOpen },
-            { id: 'upload', label: 'Upload', icon: Upload },
-            { id: 'radar', label: 'Radar', icon: Radio },
-            { id: 'rooms', label: 'Pairing', icon: QrCode },
+            { id: 'vault', label: 'Vault', icon: FolderOpen, badge: files.length },
+            { id: 'upload', label: 'Upload', icon: Upload, badge: 0 },
+            { id: 'activity', label: 'Activity', icon: Activity, badge: activities.length },
+            { id: 'radar', label: 'Radar', icon: Radio, badge: peers.length },
+            { id: 'rooms', label: 'Pairing', icon: QrCode, badge: 0 },
           ] as const
         ).map((item) => {
           const IconComponent = item.icon;
@@ -2647,11 +3455,24 @@ export default function App() {
               key={item.id}
               type="button"
               onClick={() => setActiveTab(item.id)}
-              className={`relative min-h-[44px] flex flex-col items-center justify-center transition-colors ${
+              className={`relative min-h-[48px] py-1 flex flex-col items-center justify-center transition-colors ${
                 isActive ? 'text-sky-600' : 'text-slate-500 hover:text-slate-900'
               }`}
             >
-              <IconComponent className="w-5 h-5" />
+              <div className="relative flex items-center justify-center">
+                <IconComponent className="w-5 h-5" />
+                {item.badge > 0 && (
+                  <span
+                    className={`absolute -top-1.5 -right-3.5 px-1 min-w-[16px] h-4 rounded-full text-[9px] font-mono font-bold flex items-center justify-center ${
+                      isActive
+                        ? 'bg-sky-600 text-white'
+                        : 'bg-slate-200/90 text-slate-700'
+                    }`}
+                  >
+                    {item.badge > 99 ? '99+' : item.badge}
+                  </span>
+                )}
+              </div>
               <span className="text-[10px] font-semibold tracking-tight mt-0.5 whitespace-nowrap">
                 {item.label}
               </span>
@@ -2733,6 +3554,7 @@ export default function App() {
       <FileDetailSheet
         file={selectedFile}
         categories={categories}
+        activeRoomCode={roomCode}
         canEdit={selectedFile ? canModifyOrDeleteFile(currentUser, selectedFile) : false}
         hasPrev={hasPrevFile}
         hasNext={hasNextFile}
@@ -2753,6 +3575,190 @@ export default function App() {
         onAddCategory={handleAddCategory}
       />
 
+      {/* Dedicated File QR Code Generator & Download Modal */}
+      <AnimatePresence>
+        {qrModalFile && (
+          <motion.div
+            key="file-qr-modal-backdrop"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.16, ease: [0.16, 1, 0.3, 1] }}
+            className="fixed inset-0 z-50 flex items-end md:items-center justify-center bg-slate-950/60 backdrop-blur-sm p-0 md:p-4"
+            onClick={() => setQrModalFileId(null)}
+          >
+            <motion.div
+              key="file-qr-modal-dialog"
+              initial={{ opacity: 0, y: 28, scale: 0.98 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 24, scale: 0.98 }}
+              transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="file-qr-modal-title"
+              className="w-full max-w-md bg-white rounded-t-3xl md:rounded-3xl border border-slate-200/90 p-6 space-y-5 shadow-2xl shadow-slate-950/20"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="w-10 h-1.5 bg-slate-300 rounded-full mx-auto -mt-2 mb-1 md:hidden" />
+
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <div className="w-9 h-9 rounded-xl bg-slate-900 text-white flex items-center justify-center shrink-0">
+                    <QrCode className="w-4 h-4 text-sky-400" />
+                  </div>
+                  <div className="min-w-0">
+                    <h3
+                      id="file-qr-modal-title"
+                      className="text-base font-bold text-slate-900 truncate"
+                    >
+                      File QR Code · Room {roomCode}
+                    </h3>
+                    <p className="text-xs text-slate-500 truncate">
+                      Scan in pairing room to download immediately
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setQrModalFileId(null)}
+                  aria-label="Close File QR Modal"
+                  className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-xl text-slate-500 hover:text-slate-900 hover:bg-slate-100 transition-colors"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              {(() => {
+                const fileQrUrl = buildFileQrPayloadUrl({
+                  fileId: qrModalFile.id,
+                  roomCode,
+                });
+
+                return (
+                  <>
+                    <div className="p-5 rounded-2xl bg-slate-50 border border-slate-200/80 flex flex-col items-center text-center space-y-3">
+                      <QrMatrixSvg value={fileQrUrl} size={196} />
+                      <div className="space-y-1 max-w-full">
+                        <p className="text-sm font-bold text-slate-900 truncate">
+                          {qrModalFile.name}
+                        </p>
+                        <p className="text-xs text-slate-500">
+                          <span className="font-semibold text-slate-700">
+                            {qrModalFile.category}
+                          </span>
+                          <span className="mx-1.5" aria-hidden="true">·</span>
+                          <span className="font-mono tabular-nums">
+                            {formatBytes(qrModalFile.size)}
+                          </span>
+                          <span className="mx-1.5" aria-hidden="true">·</span>
+                          <span className="font-mono tabular-nums text-sky-700 font-semibold">
+                            Room {roomCode}
+                          </span>
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="text"
+                        readOnly
+                        value={fileQrUrl}
+                        aria-label="File QR Code URL"
+                        className="flex-1 min-h-[40px] px-3 py-1.5 rounded-xl bg-slate-50 border border-slate-200 text-xs font-mono text-slate-700 truncate"
+                      />
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          try {
+                            await navigator.clipboard.writeText(fileQrUrl);
+                          } catch {
+                            // Ignore clipboard fallback
+                          }
+                          setCopiedFileQrUrl(true);
+                          setTimeout(() => setCopiedFileQrUrl(false), 2000);
+                        }}
+                        className="min-h-[40px] px-3.5 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-900 text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap interactive-press"
+                      >
+                        {copiedFileQrUrl ? (
+                          <Check className="w-4 h-4 text-emerald-600" />
+                        ) : (
+                          <Copy className="w-4 h-4" />
+                        )}
+                        <span>{copiedFileQrUrl ? 'Copied' : 'Copy'}</span>
+                      </button>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2.5">
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          await downloadFileQrPng({
+                            value: fileQrUrl,
+                            fileName: qrModalFile.name,
+                            category: qrModalFile.category,
+                            sizeLabel: formatBytes(qrModalFile.size),
+                            roomCode,
+                          });
+                          triggerToast(`Downloaded QR PNG for "${qrModalFile.name}"`);
+                        }}
+                        className="min-h-[46px] px-3.5 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold flex items-center justify-center gap-2 whitespace-nowrap interactive-press"
+                      >
+                        <Download className="w-4 h-4 text-sky-400" />
+                        <span>Download QR (PNG)</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          downloadFileQrSvg({
+                            value: fileQrUrl,
+                            fileName: qrModalFile.name,
+                            category: qrModalFile.category,
+                            sizeLabel: formatBytes(qrModalFile.size),
+                            roomCode,
+                          });
+                          triggerToast(`Downloaded QR SVG for "${qrModalFile.name}"`);
+                        }}
+                        className="min-h-[46px] px-3.5 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-900 text-xs font-semibold flex items-center justify-center gap-2 whitespace-nowrap interactive-press"
+                      >
+                        <QrCode className="w-4 h-4 text-sky-600" />
+                        <span>Download QR (SVG)</span>
+                      </button>
+                    </div>
+
+                    <div className="flex items-center justify-between pt-1">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const id = qrModalFile.id;
+                          setQrModalFileId(null);
+                          setSelectedFileId(id);
+                        }}
+                        className="text-xs font-semibold text-sky-700 hover:text-sky-800"
+                      >
+                        Inspect Full File Details →
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setQrModalFileId(null);
+                          setQrScannerOpen(true);
+                        }}
+                        className="text-xs font-semibold text-slate-600 hover:text-slate-900 flex items-center gap-1"
+                      >
+                        <Camera className="w-3.5 h-3.5" />
+                        <span>Open QR Scanner</span>
+                      </button>
+                    </div>
+                  </>
+                );
+              })()}
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* Authentication & Role-Based Authorization (RBAC) Modal */}
       <AuthAccessModal
         isOpen={authModalOpen}
@@ -2761,6 +3767,8 @@ export default function App() {
         deviceModel={senderDevice}
         onClose={() => setAuthModalOpen(false)}
         onUpdateLocalRole={handleUpdateLocalRole}
+        onActivateLocalSession={handleActivateLocalSession}
+        onSignOutSession={handleSignOutSession}
         onNotify={triggerToast}
       />
 
@@ -2779,6 +3787,7 @@ export default function App() {
           setSelectedFileId(fileId);
           setActiveTab('vault');
         }}
+        onDownloadFile={handleDownloadFile}
         onNotify={triggerToast}
       />
 

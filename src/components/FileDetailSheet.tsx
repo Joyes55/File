@@ -29,6 +29,8 @@ import {
   Edit3,
   BookOpen,
   Share2,
+  QrCode,
+  Pin,
 } from 'lucide-react';
 import {
   SharedFile,
@@ -36,12 +38,18 @@ import {
   formatBytes,
   formatDisplayDate,
 } from '../types/files';
-import { QrMatrixSvg } from './QrMatrixSvg';
+import {
+  QrMatrixSvg,
+  buildFileQrPayloadUrl,
+  downloadFileQrPng,
+  downloadFileQrSvg,
+} from './QrMatrixSvg';
 import { TransferProgressBar } from './TransferProgressBar';
 
 interface FileDetailSheetProps {
   file: SharedFile | null;
   categories: string[];
+  activeRoomCode?: string;
   canEdit: boolean;
   hasPrev?: boolean;
   hasNext?: boolean;
@@ -53,7 +61,13 @@ interface FileDetailSheetProps {
   onClose: () => void;
   onUpdateFile: (
     id: string,
-    updates: { category?: string; name?: string; notes?: string; uploadDate?: string }
+    updates: {
+      category?: string;
+      name?: string;
+      notes?: string;
+      uploadDate?: string;
+      pinned?: boolean;
+    }
   ) => Promise<void>;
   onDeleteFile: (id: string) => Promise<void>;
   onAddCategory: (name: string) => Promise<void>;
@@ -303,6 +317,7 @@ function renderMarkdownPreview(lines: { lineNumber: number; content: string }[])
 export const FileDetailSheet: React.FC<FileDetailSheetProps> = ({
   file,
   categories,
+  activeRoomCode,
   canEdit,
   hasPrev = false,
   hasNext = false,
@@ -321,6 +336,10 @@ export const FileDetailSheet: React.FC<FileDetailSheetProps> = ({
   const [pinError, setPinError] = useState('');
   const [copiedLink, setCopiedLink] = useState(false);
   const [shareFeedback, setShareFeedback] = useState<string | null>(null);
+  const [qrMode, setQrMode] = useState<'room-download' | 'direct-stream'>('room-download');
+  const [includePinInQr, setIncludePinInQr] = useState(false);
+  const [qrExpanded, setQrExpanded] = useState(false);
+  const [qrDownloadFeedback, setQrDownloadFeedback] = useState<string | null>(null);
   const [imageLoadFailed, setImageLoadFailed] = useState(false);
   const [customCategoryInput, setCustomCategoryInput] = useState('');
   const [showNewCategoryInput, setShowNewCategoryInput] = useState(false);
@@ -358,6 +377,10 @@ export const FileDetailSheet: React.FC<FileDetailSheetProps> = ({
       setPinError('');
       setCopiedLink(false);
       setShareFeedback(null);
+      setQrMode('room-download');
+      setIncludePinInQr(false);
+      setQrExpanded(false);
+      setQrDownloadFeedback(null);
       setImageLoadFailed(false);
       setCustomCategoryInput('');
       setShowNewCategoryInput(false);
@@ -533,7 +556,7 @@ export const FileDetailSheet: React.FC<FileDetailSheetProps> = ({
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 24, scale: 0.98 }}
             transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
-            className="w-full max-w-2xl bg-white rounded-t-3xl md:rounded-3xl border border-slate-200/90 max-h-[92vh] flex flex-col overflow-hidden shadow-2xl shadow-slate-950/20"
+            className="w-full max-w-2xl bg-white rounded-t-3xl md:rounded-3xl border border-slate-200/90 max-h-sheet flex flex-col overflow-hidden shadow-2xl shadow-slate-950/20"
             onClick={(e) => e.stopPropagation()}
           >
             {(() => {
@@ -561,9 +584,54 @@ export const FileDetailSheet: React.FC<FileDetailSheetProps> = ({
                     : true
                 );
 
-              const shareUrl = `${window.location.origin}/?file=${encodeURIComponent(
-                file.id
-              )}`;
+              const effectiveRoomCode = activeRoomCode || file.roomCode || '842-910';
+              const shareUrl = buildFileQrPayloadUrl({
+                fileId: file.id,
+                roomCode: effectiveRoomCode,
+                mode: qrMode,
+                pin:
+                  file.pinProtected && pinUnlocked && includePinInQr && pinInput
+                    ? pinInput
+                    : undefined,
+              });
+
+              const triggerQrFeedback = (label: string) => {
+                setQrDownloadFeedback(label);
+                setTimeout(() => {
+                  setQrDownloadFeedback((prev) => (prev === label ? null : prev));
+                }, 2400);
+              };
+
+              const handleDownloadQrPng = async () => {
+                try {
+                  await downloadFileQrPng({
+                    value: shareUrl,
+                    fileName: file.name,
+                    category: file.category,
+                    sizeLabel: formatBytes(file.size),
+                    roomCode: effectiveRoomCode,
+                    includeCardFooter: true,
+                  });
+                  triggerQrFeedback('Saved QR PNG');
+                } catch {
+                  triggerQrFeedback('QR Export Failed');
+                }
+              };
+
+              const handleDownloadQrSvg = () => {
+                try {
+                  downloadFileQrSvg({
+                    value: shareUrl,
+                    fileName: file.name,
+                    category: file.category,
+                    sizeLabel: formatBytes(file.size),
+                    roomCode: effectiveRoomCode,
+                  });
+                  triggerQrFeedback('Saved QR SVG');
+                } catch {
+                  triggerQrFeedback('SVG Export Failed');
+                }
+              };
 
               const handleUnlockPin = async (e: React.FormEvent) => {
                 e.preventDefault();
@@ -810,7 +878,7 @@ export const FileDetailSheet: React.FC<FileDetailSheetProps> = ({
                   <div className="w-10 h-1.5 bg-slate-300 rounded-full mx-auto mt-3 mb-1 shrink-0 md:hidden" />
 
                   {/* Sheet Header with Prev/Next Navigation */}
-                  <div className="flex items-center justify-between px-5 py-3.5 border-b border-slate-100 shrink-0 gap-2">
+                  <div className="flex items-center justify-between px-4 sm:px-5 py-3.5 border-b border-slate-100 shrink-0 gap-2">
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2">
                         <h3 className="text-base font-bold text-slate-900 truncate">
@@ -835,10 +903,53 @@ export const FileDetailSheet: React.FC<FileDetailSheetProps> = ({
                         <span className="font-mono tabular-nums">
                           {formatDisplayDate(file.uploadDate)}
                         </span>
+                        {file.pinned && (
+                          <>
+                            <span className="mx-1.5" aria-hidden="true">·</span>
+                            <span className="font-semibold text-amber-700">Pinned</span>
+                          </>
+                        )}
                       </p>
                     </div>
 
                     <div className="flex items-center gap-1 shrink-0">
+                      {canEdit && (
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            setIsSaving(true);
+                            try {
+                              await onUpdateFile(file.id, { pinned: !file.pinned });
+                            } finally {
+                              setIsSaving(false);
+                            }
+                          }}
+                          aria-label={
+                            file.pinned
+                              ? `Unpin ${file.name} from top`
+                              : `Pin ${file.name} to top`
+                          }
+                          title={
+                            file.pinned ? 'Unpin file from top' : 'Pin file to top of vault'
+                          }
+                          className={`min-h-[38px] px-2.5 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-colors mr-1 ${
+                            file.pinned
+                              ? 'bg-amber-100 text-amber-900 hover:bg-amber-200/80'
+                              : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                          }`}
+                        >
+                          <Pin
+                            className={`w-3.5 h-3.5 -rotate-45 ${
+                              file.pinned
+                                ? 'fill-amber-600 text-amber-600'
+                                : 'text-slate-500'
+                            }`}
+                          />
+                          <span className="hidden sm:inline">
+                            {file.pinned ? 'Pinned to Top' : 'Pin to Top'}
+                          </span>
+                        </button>
+                      )}
                       {(hasPrev || hasNext) && (
                         <div className="flex items-center bg-slate-100 rounded-xl p-0.5 mr-1">
                           <button
@@ -876,7 +987,7 @@ export const FileDetailSheet: React.FC<FileDetailSheetProps> = ({
                   </div>
 
                   {/* Scrollable Sheet Content */}
-                  <div className="p-5 overflow-y-auto space-y-6 flex-1">
+                  <div className="p-4 sm:p-5 overflow-y-auto space-y-5 sm:space-y-6 flex-1">
                     {/* Optional Inline Rename & Notes Editor */}
                     {canEdit && isEditingMeta && (
                       <form
@@ -1010,17 +1121,21 @@ export const FileDetailSheet: React.FC<FileDetailSheetProps> = ({
                           <div className="rounded-2xl border border-slate-200/90 overflow-hidden bg-slate-950">
                             {/* Image Inspection Toolbar */}
                             <div className="px-3.5 py-2.5 bg-slate-900 border-b border-slate-800 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-300">
-                              <div className="flex items-center gap-2 min-w-0">
-                                <span className="px-2 py-0.5 rounded-md bg-sky-500/20 text-sky-300 font-mono text-[11px] font-semibold">
+                              <div className="flex items-center gap-1.5 min-w-0 font-mono text-[11px]">
+                                <span className="text-sky-300 font-semibold">
                                   {imageInfo.formatBadge}
                                 </span>
                                 {imageDimensions && (
-                                  <span className="font-mono tabular-nums text-[11px] text-slate-400">
-                                    {imageDimensions.width} × {imageDimensions.height} px
-                                  </span>
+                                  <>
+                                    <span aria-hidden="true" className="text-slate-600">·</span>
+                                    <span className="tabular-nums text-slate-400">
+                                      {imageDimensions.width} × {imageDimensions.height} px
+                                    </span>
+                                  </>
                                 )}
-                                <span className="hidden sm:inline text-[11px] text-slate-500">
-                                  · {file.dataUrl ? 'DataURL' : 'Asset Preview'}
+                                <span className="hidden sm:inline text-slate-600" aria-hidden="true">·</span>
+                                <span className="hidden sm:inline text-slate-400 font-sans">
+                                  {file.dataUrl ? 'DataURL' : 'Asset Preview'}
                                 </span>
                               </div>
 
@@ -1186,8 +1301,8 @@ export const FileDetailSheet: React.FC<FileDetailSheetProps> = ({
                           <div className="rounded-2xl border border-slate-200/90 overflow-hidden bg-slate-950 text-slate-100">
                             {/* Text Viewer Top Header & Mode Switcher */}
                             <div className="px-3.5 py-2.5 bg-slate-900 border-b border-slate-800 flex flex-wrap items-center justify-between gap-2">
-                              <div className="flex items-center gap-2 flex-wrap">
-                                <span className="px-2 py-0.5 rounded-md bg-sky-500/20 text-sky-300 font-mono text-[11px] font-semibold flex items-center gap-1">
+                              <div className="flex items-center gap-1.5 flex-wrap font-mono text-[11px]">
+                                <span className="text-sky-300 font-semibold flex items-center gap-1">
                                   {textAnalysis.isJson ? (
                                     <FileJson className="w-3 h-3" />
                                   ) : textAnalysis.isCsv ? (
@@ -1198,27 +1313,32 @@ export const FileDetailSheet: React.FC<FileDetailSheetProps> = ({
                                   <span>{textAnalysis.formatLabel}</span>
                                 </span>
 
-                                <span className="font-mono tabular-nums text-[11px] text-slate-400">
+                                <span aria-hidden="true" className="text-slate-600">·</span>
+
+                                <span className="tabular-nums text-slate-400">
                                   {allLines.length} {allLines.length === 1 ? 'line' : 'lines'} ·{' '}
                                   {resolvedText?.length.toLocaleString()} chars
                                 </span>
 
                                 {textAnalysis.isJson && (
-                                  <span
-                                    className={`px-2 py-0.5 rounded-md font-mono text-[11px] ${
-                                      textAnalysis.jsonError
-                                        ? 'bg-rose-500/20 text-rose-300'
-                                        : 'bg-emerald-500/20 text-emerald-300'
-                                    }`}
-                                  >
-                                    {textAnalysis.jsonError
-                                      ? 'Invalid JSON'
-                                      : `Valid JSON · ${textAnalysis.jsonKeyCount} ${
-                                          Array.isArray(textAnalysis.parsedJson)
-                                            ? 'items'
-                                            : 'keys'
-                                        }`}
-                                  </span>
+                                  <>
+                                    <span aria-hidden="true" className="text-slate-600">·</span>
+                                    <span
+                                      className={
+                                        textAnalysis.jsonError
+                                          ? 'text-rose-300 font-semibold'
+                                          : 'text-emerald-300 font-semibold'
+                                      }
+                                    >
+                                      {textAnalysis.jsonError
+                                        ? 'Invalid JSON'
+                                        : `Valid JSON · ${textAnalysis.jsonKeyCount} ${
+                                            Array.isArray(textAnalysis.parsedJson)
+                                              ? 'items'
+                                              : 'keys'
+                                          }`}
+                                    </span>
+                                  </>
                                 )}
                               </div>
 
@@ -1693,70 +1813,164 @@ export const FileDetailSheet: React.FC<FileDetailSheetProps> = ({
                       </div>
                     </div>
 
-                    {/* Instant QR, Direct Link & Native Web Share API Actions */}
-                    <div className="pt-3 border-t border-slate-100 flex flex-col sm:flex-row items-center gap-4">
-                      <QrMatrixSvg value={shareUrl} size={108} />
-                      <div className="flex-1 space-y-2.5 w-full">
-                        <div className="flex items-center justify-between gap-2">
-                          <p className="text-xs font-semibold text-slate-900">
-                            Direct Mobile Peer Link & Native Share
+                    {/* Instant File QR Code Generator, Download & Native Web Share API Actions */}
+                    <div className="pt-4 border-t border-slate-100 space-y-3.5">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div>
+                          <p className="text-xs font-bold text-slate-900 flex items-center gap-1.5">
+                            <QrCode className="w-3.5 h-3.5 text-sky-600" />
+                            <span>File QR Code for Room {effectiveRoomCode}</span>
                           </p>
-                          {shareFeedback && (
-                            <span className="text-[11px] font-mono font-semibold text-emerald-700">
-                              {shareFeedback}
+                          <p className="text-[11px] text-slate-500 mt-0.5">
+                            Generate and download a scannable QR code so peers in Room {effectiveRoomCode} can scan and download this file immediately.
+                          </p>
+                        </div>
+
+                        <div className="flex items-center gap-1.5">
+                          {(qrDownloadFeedback || shareFeedback) && (
+                            <span className="text-[11px] font-mono font-semibold text-emerald-700 mr-1">
+                              {qrDownloadFeedback || shareFeedback}
                             </span>
                           )}
+                          <div className="flex items-center p-0.5 rounded-xl bg-slate-100">
+                            <button
+                              type="button"
+                              onClick={() => setQrMode('room-download')}
+                              className={`min-h-[30px] px-2.5 py-1 rounded-lg text-[11px] font-semibold transition-colors whitespace-nowrap ${
+                                qrMode === 'room-download'
+                                  ? 'bg-white text-slate-900 shadow-xs'
+                                  : 'text-slate-600 hover:text-slate-900'
+                              }`}
+                            >
+                              Room + Auto-Download
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setQrMode('direct-stream')}
+                              className={`min-h-[30px] px-2.5 py-1 rounded-lg text-[11px] font-semibold transition-colors whitespace-nowrap ${
+                                qrMode === 'direct-stream'
+                                  ? 'bg-white text-slate-900 shadow-xs'
+                                  : 'text-slate-600 hover:text-slate-900'
+                              }`}
+                            >
+                              Direct File Stream
+                            </button>
+                          </div>
                         </div>
-                        <p className="text-xs text-slate-500">
-                          Scan with a nearby phone camera, copy the transfer URL, or trigger your device&apos;s native share sheet to beam the metadata link or file contents.
-                        </p>
-                        <div className="flex items-center gap-2">
-                          <input
-                            type="text"
-                            readOnly
-                            value={shareUrl}
-                            className="flex-1 min-h-[44px] px-3 py-2 rounded-xl bg-slate-50 border border-slate-200 text-xs font-mono text-slate-700 truncate"
-                          />
+                      </div>
+
+                      <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200/80 flex flex-col sm:flex-row items-center gap-4">
+                        <div className="flex flex-col items-center gap-2 shrink-0">
+                          <QrMatrixSvg value={shareUrl} size={qrExpanded ? 200 : 124} />
                           <button
                             type="button"
-                            onClick={handleCopyShareLink}
-                            className="min-h-[44px] px-3.5 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-900 text-xs font-semibold flex items-center gap-1.5 transition-colors whitespace-nowrap interactive-press"
+                            onClick={() => setQrExpanded((v) => !v)}
+                            className="text-[11px] font-semibold text-sky-700 hover:text-sky-800 flex items-center gap-1"
                           >
-                            {copiedLink ? (
-                              <Check className="w-4 h-4 text-emerald-600" />
+                            {qrExpanded ? (
+                              <>
+                                <Minimize2 className="w-3 h-3" />
+                                <span>Compact QR Size</span>
+                              </>
                             ) : (
-                              <Copy className="w-4 h-4" />
+                              <>
+                                <Maximize2 className="w-3 h-3" />
+                                <span>Enlarge for Room Scan</span>
+                              </>
                             )}
-                            <span>{copiedLink ? 'Copied' : 'Copy'}</span>
                           </button>
                         </div>
 
-                        <div className="flex flex-wrap items-center gap-2 pt-0.5">
-                          <button
-                            type="button"
-                            onClick={() => handleNativeShareFile('link')}
-                            className="min-h-[40px] px-3.5 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-semibold flex items-center gap-1.5 transition-colors whitespace-nowrap interactive-press"
-                          >
-                            <Share2 className="w-3.5 h-3.5 text-sky-600" />
-                            <span>Share Metadata Link</span>
-                          </button>
+                        <div className="flex-1 space-y-3 w-full min-w-0">
+                          {/* Download QR Code Buttons (PNG Card & Vector SVG) */}
+                          <div className="flex flex-wrap items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={handleDownloadQrPng}
+                              className="min-h-[42px] px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold flex items-center gap-2 transition-colors whitespace-nowrap interactive-press"
+                            >
+                              <Download className="w-3.5 h-3.5 text-sky-400" />
+                              <span>Download QR (PNG)</span>
+                            </button>
 
-                          <button
-                            type="button"
-                            disabled={!pinUnlocked}
-                            onClick={() => handleNativeShareFile('contents')}
-                            className="min-h-[40px] px-3.5 py-1.5 rounded-xl bg-sky-50 hover:bg-sky-100 disabled:opacity-50 text-sky-900 border border-sky-200/80 text-xs font-semibold flex items-center gap-1.5 transition-colors whitespace-nowrap interactive-press"
-                          >
-                            <Share2 className="w-3.5 h-3.5 text-sky-600" />
-                            <span>Share File Contents</span>
-                          </button>
+                            <button
+                              type="button"
+                              onClick={handleDownloadQrSvg}
+                              className="min-h-[42px] px-3.5 py-2 rounded-xl bg-white hover:bg-slate-100 text-slate-800 border border-slate-200 text-xs font-semibold flex items-center gap-1.5 transition-colors whitespace-nowrap interactive-press"
+                            >
+                              <QrCode className="w-3.5 h-3.5 text-sky-600" />
+                              <span>Download QR (SVG)</span>
+                            </button>
+
+                            {file.pinProtected && pinUnlocked && pinInput && (
+                              <button
+                                type="button"
+                                onClick={() => setIncludePinInQr((v) => !v)}
+                                className={`min-h-[42px] px-3 py-2 rounded-xl text-xs font-semibold flex items-center gap-1.5 border transition-colors whitespace-nowrap ${
+                                  includePinInQr
+                                    ? 'bg-emerald-50 border-emerald-300 text-emerald-900'
+                                    : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-100'
+                                }`}
+                              >
+                                <Lock className="w-3.5 h-3.5 text-amber-600" />
+                                <span>
+                                  {includePinInQr ? 'PIN Embedded in QR' : 'Include Unlock PIN'}
+                                </span>
+                              </button>
+                            )}
+                          </div>
+
+                          {/* Encoded QR URL & Copy Control */}
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="text"
+                              readOnly
+                              value={shareUrl}
+                              aria-label="Encoded File QR URL"
+                              className="flex-1 min-h-[40px] px-3 py-1.5 rounded-xl bg-white border border-slate-200 text-xs font-mono text-slate-700 truncate"
+                            />
+                            <button
+                              type="button"
+                              onClick={handleCopyShareLink}
+                              className="min-h-[40px] px-3.5 py-1.5 rounded-xl bg-white hover:bg-slate-100 border border-slate-200 text-slate-900 text-xs font-semibold flex items-center gap-1.5 transition-colors whitespace-nowrap interactive-press"
+                            >
+                              {copiedLink ? (
+                                <Check className="w-4 h-4 text-emerald-600" />
+                              ) : (
+                                <Copy className="w-4 h-4" />
+                              )}
+                              <span>{copiedLink ? 'Copied' : 'Copy URL'}</span>
+                            </button>
+                          </div>
+
+                          {/* Native Web Share API Actions */}
+                          <div className="flex flex-wrap items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => handleNativeShareFile('link')}
+                              className="min-h-[38px] px-3 py-1.5 rounded-xl bg-white hover:bg-slate-100 border border-slate-200 text-slate-800 text-xs font-semibold flex items-center gap-1.5 transition-colors whitespace-nowrap interactive-press"
+                            >
+                              <Share2 className="w-3.5 h-3.5 text-sky-600" />
+                              <span>Share Metadata Link</span>
+                            </button>
+
+                            <button
+                              type="button"
+                              disabled={!pinUnlocked}
+                              onClick={() => handleNativeShareFile('contents')}
+                              className="min-h-[38px] px-3 py-1.5 rounded-xl bg-sky-50 hover:bg-sky-100 disabled:opacity-50 text-sky-900 border border-sky-200/80 text-xs font-semibold flex items-center gap-1.5 transition-colors whitespace-nowrap interactive-press"
+                            >
+                              <Share2 className="w-3.5 h-3.5 text-sky-600" />
+                              <span>Share File Contents</span>
+                            </button>
+                          </div>
                         </div>
                       </div>
                     </div>
                   </div>
 
                   {/* Sticky Sheet Footer Actions + Real-Time Download/Upload Progress Bar */}
-                  <div className="p-4 border-t border-slate-100 bg-white space-y-3 shrink-0">
+                  <div className="p-3.5 sm:p-4 pb-safe border-t border-slate-100 bg-white space-y-3 shrink-0">
                     {activeTransfer && (
                       <TransferProgressBar transfer={activeTransfer} compact />
                     )}

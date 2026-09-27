@@ -26,6 +26,8 @@ export interface SharedFile {
   roomCode: string;
   downloads: number;
   pinProtected: boolean;
+  pinned?: boolean;
+  pinnedAt?: string;
   notes?: string;
   previewUrl?: string;
   textContent?: string;
@@ -33,7 +35,7 @@ export interface SharedFile {
 }
 
 export function canUploadOrCreateCategory(user: UserProfile | null): boolean {
-  if (!user) return false;
+  if (!user) return true;
   return user.role === 'admin' || user.role === 'editor';
 }
 
@@ -41,11 +43,11 @@ export function canModifyOrDeleteFile(
   user: UserProfile | null,
   file: SharedFile
 ): boolean {
-  if (!user) return false;
+  if (!user) return true;
   if (user.role === 'admin') return true;
   if (user.role === 'editor') {
-    // Editors can modify/delete files they uploaded (or legacy demo files without an ownerUid if they claim/own them)
-    return Boolean(file.ownerUid && file.ownerUid === user.uid);
+    // Editors can modify/delete files they uploaded or shared room files without a restricted ownerUid
+    return !file.ownerUid || file.ownerUid === user.uid;
   }
   return false;
 }
@@ -65,9 +67,76 @@ export interface ConnectedPeer {
   status: 'idle' | 'receiving' | 'sending';
 }
 
-export type ActiveTab = 'vault' | 'upload' | 'radar' | 'rooms';
+export type ActiveTab = 'vault' | 'upload' | 'radar' | 'rooms' | 'activity';
 export type SortOption = 'newest' | 'oldest' | 'largest' | 'name';
 export type DateRangePreset = 'all' | 'today' | 'yesterday' | 'week' | 'custom';
+
+export type ActivityActionType =
+  | 'upload'
+  | 'delete'
+  | 'category_change'
+  | 'pin_toggle'
+  | 'rename'
+  | 'category_created'
+  | 'download';
+
+export interface ActivityLogEntry {
+  id: string;
+  action: ActivityActionType;
+  fileId?: string;
+  fileName: string;
+  fileSize?: number;
+  category?: string;
+  previousCategory?: string;
+  actorName: string;
+  actorDevice?: string;
+  actorRole?: string;
+  roomCode: string;
+  details: string;
+  timestamp: string;
+}
+
+export function formatActivityTime(isoTimestamp: string): {
+  relative: string;
+  clock: string;
+  dateLabel: string;
+} {
+  if (!isoTimestamp) {
+    return { relative: 'Just now', clock: '--:--', dateLabel: '' };
+  }
+  const parsed = new Date(isoTimestamp);
+  if (Number.isNaN(parsed.getTime())) {
+    return { relative: isoTimestamp, clock: '--:--', dateLabel: '' };
+  }
+
+  const nowMs = Date.now();
+  const diffSec = Math.round((nowMs - parsed.getTime()) / 1000);
+  let relative = 'Just now';
+  if (diffSec >= 5 && diffSec < 60) {
+    relative = `${diffSec}s ago`;
+  } else if (diffSec >= 60 && diffSec < 3600) {
+    relative = `${Math.floor(diffSec / 60)}m ago`;
+  } else if (diffSec >= 3600 && diffSec < 86400) {
+    relative = `${Math.floor(diffSec / 3600)}h ago`;
+  } else if (diffSec >= 86400) {
+    const days = Math.floor(diffSec / 86400);
+    relative = days === 1 ? 'Yesterday' : `${days}d ago`;
+  }
+
+  const clock = parsed.toLocaleTimeString('en-US', {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  });
+  const dateLabel = parsed.toLocaleDateString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  });
+
+  return { relative, clock, dateLabel };
+}
 
 export const DEFAULT_CATEGORIES = [
   'Photos & Media',

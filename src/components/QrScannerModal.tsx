@@ -18,7 +18,11 @@ import {
   Eye,
 } from 'lucide-react';
 import { SharedFile, formatBytes, formatDisplayDate } from '../types/files';
-import { QrMatrixSvg } from './QrMatrixSvg';
+import {
+  QrMatrixSvg,
+  buildFileQrPayloadUrl,
+  downloadFileQrPng,
+} from './QrMatrixSvg';
 
 export type ParsedQrResult =
   | {
@@ -30,6 +34,8 @@ export type ParsedQrResult =
       type: 'file';
       fileId: string;
       file?: SharedFile;
+      roomCode?: string;
+      pin?: string;
       raw: string;
     }
   | {
@@ -46,21 +52,15 @@ export function parseScannedQrPayload(
     return { type: 'unknown', raw: '' };
   }
 
-  // 1. Try parsing as URL (?room=... or ?file=... or /api/files/:id/download)
+  // 1. Try parsing as URL (?room=...&file=... or ?file=... or /api/files/:id/download or ?room=...)
   try {
     const url = new URL(raw, window.location.origin);
-    const roomParam = url.searchParams.get('room');
-    if (roomParam && roomParam.trim()) {
-      return {
-        type: 'room',
-        roomCode: roomParam.trim(),
-        raw,
-      };
-    }
+    const roomParam = url.searchParams.get('room')?.trim() || undefined;
+    const fileParam = url.searchParams.get('file')?.trim() || undefined;
+    const pinParam = url.searchParams.get('pin')?.trim() || undefined;
 
-    const fileParam = url.searchParams.get('file');
-    if (fileParam && fileParam.trim()) {
-      const targetId = fileParam.trim();
+    if (fileParam) {
+      const targetId = fileParam;
       const matched = files.find(
         (f) =>
           f.id.toLowerCase() === targetId.toLowerCase() ||
@@ -70,6 +70,8 @@ export function parseScannedQrPayload(
         type: 'file',
         fileId: matched ? matched.id : targetId,
         file: matched,
+        roomCode: roomParam || matched?.roomCode,
+        pin: pinParam,
         raw,
       };
     }
@@ -82,6 +84,16 @@ export function parseScannedQrPayload(
         type: 'file',
         fileId: targetId,
         file: matched,
+        roomCode: roomParam || matched?.roomCode,
+        pin: pinParam,
+        raw,
+      };
+    }
+
+    if (roomParam) {
+      return {
+        type: 'room',
+        roomCode: roomParam,
         raw,
       };
     }
@@ -151,6 +163,7 @@ interface QrScannerModalProps {
   onClose: () => void;
   onJoinRoom: (roomCode: string) => void;
   onInspectFile: (fileId: string) => void;
+  onDownloadFile?: (file: SharedFile, pinCode?: string) => void;
   onNotify: (message: string) => void;
 }
 
@@ -161,6 +174,7 @@ export const QrScannerModal: React.FC<QrScannerModalProps> = ({
   onClose,
   onJoinRoom,
   onInspectFile,
+  onDownloadFile,
   onNotify,
 }) => {
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -201,22 +215,31 @@ export const QrScannerModal: React.FC<QrScannerModalProps> = ({
     setTorchSupported(false);
   }, []);
 
-  const triggerBrowserDownload = useCallback((file: SharedFile, pin?: string) => {
-    const pinQuery = file.pinProtected && pin ? `?pin=${encodeURIComponent(pin)}` : '';
-    const link = document.createElement('a');
-    link.href = `/api/files/${file.id}/download${pinQuery}`;
-    link.download = file.name;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    setDownloadTriggered(true);
-  }, []);
+  const triggerBrowserDownload = useCallback(
+    (file: SharedFile, pin?: string) => {
+      if (onDownloadFile) {
+        onDownloadFile(file, pin);
+        setDownloadTriggered(true);
+        return;
+      }
+      const pinQuery =
+        file.pinProtected && pin ? `?pin=${encodeURIComponent(pin)}` : '';
+      const link = document.createElement('a');
+      link.href = `/api/files/${file.id}/download${pinQuery}`;
+      link.download = file.name;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      setDownloadTriggered(true);
+    },
+    [onDownloadFile]
+  );
 
   const handleDecodedQrString = useCallback(
     (rawString: string) => {
       const parsed = parseScannedQrPayload(rawString, files);
       setScannedResult(parsed);
-      setPinInput('');
+      setPinInput(parsed.type === 'file' && parsed.pin ? parsed.pin : '');
       setPinError('');
       setDownloadTriggered(false);
 
@@ -227,14 +250,28 @@ export const QrScannerModal: React.FC<QrScannerModalProps> = ({
         }
       } else if (parsed.type === 'file' && parsed.file) {
         const targetFile = parsed.file;
-        setPinVerified(!targetFile.pinProtected);
-        if (autoExecuteOnScan && !targetFile.pinProtected) {
-          triggerBrowserDownload(targetFile);
-          onNotify(`Scanned QR: Downloading "${targetFile.name}"`);
+        const targetRoom = parsed.roomCode || targetFile.roomCode;
+        if (targetRoom && targetRoom !== currentRoomCode) {
+          onJoinRoom(targetRoom);
+        }
+        const unlockedViaQrPin = Boolean(parsed.pin);
+        setPinVerified(!targetFile.pinProtected || unlockedViaQrPin);
+        if (autoExecuteOnScan && (!targetFile.pinProtected || unlockedViaQrPin)) {
+          triggerBrowserDownload(targetFile, parsed.pin);
+          onNotify(
+            `Scanned File QR: Paired to Room ${targetRoom} & downloading "${targetFile.name}"`
+          );
         }
       }
     },
-    [autoExecuteOnScan, files, onJoinRoom, onNotify, triggerBrowserDownload]
+    [
+      autoExecuteOnScan,
+      currentRoomCode,
+      files,
+      onJoinRoom,
+      onNotify,
+      triggerBrowserDownload,
+    ]
   );
 
   // Initialize camera stream and QR frame scanner loop
@@ -766,7 +803,7 @@ export const QrScannerModal: React.FC<QrScannerModalProps> = ({
                             </span>
                           </p>
                           <p className="text-xs text-slate-500 mt-1">
-                            Shared by {scannedResult.file.senderName} ({scannedResult.file.senderDevice})
+                            Shared by {scannedResult.file.senderName} ({scannedResult.file.senderDevice}) · Room {scannedResult.roomCode || scannedResult.file.roomCode}
                           </p>
                         </div>
                       </div>
@@ -901,7 +938,10 @@ export const QrScannerModal: React.FC<QrScannerModalProps> = ({
                   type="button"
                   onClick={() =>
                     handleDecodedQrString(
-                      `${window.location.origin}/?file=${encodeURIComponent(sampleFile.id)}`
+                      buildFileQrPayloadUrl({
+                        fileId: sampleFile.id,
+                        roomCode: sampleFile.roomCode || currentRoomCode,
+                      })
                     )
                   }
                   className="min-h-[40px] px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-xs font-semibold text-slate-800 flex items-center gap-1.5 transition-colors whitespace-nowrap max-w-full"
@@ -912,11 +952,11 @@ export const QrScannerModal: React.FC<QrScannerModalProps> = ({
               ))}
             </div>
 
-            {/* Expandable Scannable QR Cards (Point another phone at these or screenshot & upload!) */}
+            {/* Expandable Scannable QR Cards (Point another phone at these or download & upload!) */}
             {showSampleGenerator && (
               <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200/80 space-y-3">
                 <p className="text-xs text-slate-600">
-                  Point a physical phone camera at these standards-compliant QR codes, or screenshot one and tap <strong>Scan Photo</strong> above to test optical decoding:
+                  Point a phone camera at these QR codes, or click <strong>Download QR PNG</strong> and then <strong>Scan Photo</strong> above to test instant pairing-room file downloads:
                 </p>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div className="p-3 rounded-xl bg-white border border-slate-200 flex items-center gap-3">
@@ -935,16 +975,38 @@ export const QrScannerModal: React.FC<QrScannerModalProps> = ({
                   {files[0] && (
                     <div className="p-3 rounded-xl bg-white border border-slate-200 flex items-center gap-3">
                       <QrMatrixSvg
-                        value={`${window.location.origin}/?file=${encodeURIComponent(files[0].id)}`}
+                        value={buildFileQrPayloadUrl({
+                          fileId: files[0].id,
+                          roomCode: files[0].roomCode || currentRoomCode,
+                        })}
                         size={84}
                       />
-                      <div className="min-w-0">
+                      <div className="min-w-0 flex-1 space-y-1.5">
                         <p className="text-xs font-bold text-slate-900 truncate">
                           {files[0].name}
                         </p>
-                        <p className="text-[11px] text-slate-500 mt-0.5">
-                          Direct file download QR
+                        <p className="text-[11px] text-slate-500">
+                          Room {files[0].roomCode || currentRoomCode} · Instant Download QR
                         </p>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            downloadFileQrPng({
+                              value: buildFileQrPayloadUrl({
+                                fileId: files[0].id,
+                                roomCode: files[0].roomCode || currentRoomCode,
+                              }),
+                              fileName: files[0].name,
+                              category: files[0].category,
+                              sizeLabel: formatBytes(files[0].size),
+                              roomCode: files[0].roomCode || currentRoomCode,
+                            })
+                          }
+                          className="min-h-[30px] px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-[11px] font-semibold inline-flex items-center gap-1"
+                        >
+                          <Download className="w-3 h-3 text-sky-400" />
+                          <span>Download QR PNG</span>
+                        </button>
                       </div>
                     </div>
                   )}
