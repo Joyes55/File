@@ -3,6 +3,8 @@ import { createServer } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import path from 'path';
 import fs from 'fs';
+import crypto from 'crypto';
+import JSZip from 'jszip';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -26,6 +28,15 @@ export interface SharedFileRecord {
   pinCode?: string;
   pinned?: boolean;
   pinnedAt?: string;
+  favorite?: boolean;
+  favoritedAt?: string;
+  encrypted?: boolean;
+  encryptionAlgo?: string;
+  encryptionIv?: string;
+  encryptionSalt?: string;
+  encryptionFingerprint?: string;
+  encryptedPayload?: string;
+  keyHint?: string;
   notes?: string;
   previewUrl?: string;
   textContent?: string;
@@ -65,6 +76,28 @@ export interface ActivityLogRecord {
   roomCode: string;
   details: string;
   timestamp: string;
+}
+
+export interface SharedBundleRecord {
+  id: string;
+  archiveName: string;
+  roomCode: string;
+  createdBy: string;
+  ownerUid: string;
+  createdByDevice?: string;
+  createdAt: string;
+  expiresAt: string;
+  ttlMinutes: number;
+  fileIds: string[];
+  fileNames: string[];
+  fileCount: number;
+  totalBytes: number;
+  bundleZipBytes: number;
+  downloads: number;
+  revoked: boolean;
+  shareUrl: string;
+  downloadUrl: string;
+  zipBuffer: Buffer;
 }
 
 // Helper to generate a valid tiny 1-second 440Hz sine wave WAV buffer
@@ -155,10 +188,64 @@ RD-BAT-05,Li-Po 2400mAh High-Discharge Cell,Power,5.60,250,1400.00,7
 
 const sampleWavDataUrl = createSampleWavDataUrl();
 
+function createSeededEncryptedFilePayload() {
+  const plaintextDoc = JSON.stringify(
+    {
+      protocol: 'RelayDrop Zero-Knowledge E2EE Mesh v4.2',
+      cipherSuite: 'AES-256-GCM (Web Crypto API)',
+      kdf: 'PBKDF2-HMAC-SHA256 (100,000 iterations)',
+      roomCode: '842-910',
+      emergencyRecoveryTokens: [
+        'RD-2026-ALPHA-9941-X8B2',
+        'RD-2026-BRAVO-7730-M4K9',
+        'RD-2026-DELTA-3108-Q2V7',
+      ],
+      notes: 'Decrypted locally in browser memory via window.crypto.subtle.decrypt.',
+    },
+    null,
+    2
+  );
+
+  const envelope = JSON.stringify({
+    textContent: plaintextDoc,
+    originalMimeType: 'application/json',
+    originalName: 'zero-trust-mesh-keys-2026.json',
+    encryptedAt: '2026-09-26T06:45:00.000Z',
+  });
+
+  const passphrase = 'relaydrop-2026';
+  const salt = Buffer.from('relaydrop-salt16', 'utf-8'); // 16 bytes
+  const iv = Buffer.from('relaydropiv1', 'utf-8'); // 12 bytes
+  const key = crypto.pbkdf2Sync(passphrase, salt, 100000, 32, 'sha256');
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  const encryptedBuf = Buffer.concat([
+    cipher.update(Buffer.from(envelope, 'utf-8')),
+    cipher.final(),
+    cipher.getAuthTag(),
+  ]);
+  const fingerprint = crypto
+    .createHash('sha256')
+    .update(encryptedBuf)
+    .digest('hex')
+    .slice(0, 16);
+
+  return {
+    encrypted: true,
+    encryptionAlgo: 'AES-256-GCM · PBKDF2-SHA256',
+    encryptionIv: iv.toString('base64'),
+    encryptionSalt: salt.toString('base64'),
+    encryptionFingerprint: fingerprint,
+    encryptedPayload: encryptedBuf.toString('base64'),
+    keyHint: 'Demo passphrase: relaydrop-2026',
+    byteLength: Buffer.byteLength(plaintextDoc, 'utf-8'),
+  };
+}
+
 const filesStore: Map<string, SharedFileRecord> = new Map();
 const categoriesStore: Set<string> = new Set(initialCategories);
 const peersStore: Map<string, ConnectedPeer> = new Map();
 const activityStore: ActivityLogRecord[] = [];
+const bundlesStore: Map<string, SharedBundleRecord> = new Map();
 
 function appendActivityLog(
   entry: Omit<ActivityLogRecord, 'id' | 'timestamp'> & {
@@ -226,6 +313,8 @@ function seedInitialFiles() {
       pinProtected: false,
       pinned: true,
       pinnedAt: '2026-09-26T08:00:00.000Z',
+      favorite: true,
+      favoritedAt: '2026-09-26T08:05:00.000Z',
       notes: 'Golden hour exterior facade study with lakeside timber reflections.',
       previewUrl: '/src/assets/images/sample_architectural_render_1790426251205.jpg',
       dataUrl: loadAssetDataUrl(archAssetPath, 'image/jpeg'),
@@ -262,6 +351,8 @@ function seedInitialFiles() {
       roomCode: '842-910',
       downloads: 27,
       pinProtected: false,
+      favorite: true,
+      favoritedAt: '2026-09-25T16:25:00.000Z',
       notes: 'Complete P2P WebSocket mesh protocol & mobile ergonomics specification.',
       textContent: sampleMarkdownSpec,
     },
@@ -315,6 +406,30 @@ function seedInitialFiles() {
       textContent: sampleCsvBom,
     },
   ];
+
+  const seededE2ee = createSeededEncryptedFilePayload();
+  initialFiles.splice(2, 0, {
+    id: 'file-e2ee-keys-07',
+    name: 'zero-trust-mesh-keys-2026.json',
+    size: seededE2ee.byteLength,
+    mimeType: 'application/json',
+    category: 'Archives & Code',
+    uploadedAt: '2026-09-26T06:45:00.000Z',
+    uploadDate: '2026-09-26',
+    senderName: 'Soren Lindqvist',
+    senderDevice: 'iPhone 16 Pro',
+    roomCode: '842-910',
+    downloads: 8,
+    pinProtected: false,
+    encrypted: true,
+    encryptionAlgo: seededE2ee.encryptionAlgo,
+    encryptionIv: seededE2ee.encryptionIv,
+    encryptionSalt: seededE2ee.encryptionSalt,
+    encryptionFingerprint: seededE2ee.encryptionFingerprint,
+    encryptedPayload: seededE2ee.encryptedPayload,
+    keyHint: seededE2ee.keyHint,
+    notes: 'End-to-end encrypted recovery key bundle (AES-256-GCM). Passphrase: relaydrop-2026',
+  });
 
   for (const item of initialFiles) {
     filesStore.set(item.id, item);
@@ -462,6 +577,133 @@ function sanitizeFileForClient(file: SharedFileRecord): Omit<SharedFileRecord, '
   return rest;
 }
 
+function sanitizeBundleForClient(
+  bundle: SharedBundleRecord
+): Omit<SharedBundleRecord, 'zipBuffer'> {
+  const { zipBuffer, ...rest } = bundle;
+  return rest;
+}
+
+async function buildZipBufferForFiles(
+  files: SharedFileRecord[],
+  bundleMeta: {
+    bundleId: string;
+    archiveName: string;
+    roomCode: string;
+    createdBy: string;
+    createdAt: string;
+    expiresAt: string;
+    ttlMinutes: number;
+  }
+): Promise<Buffer> {
+  const zip = new JSZip();
+  const usedNames = new Map<string, number>();
+
+  for (const file of files) {
+    let entryName = file.name.replace(/[/\\?%*:|"<>]/g, '_');
+    const seenCount = usedNames.get(entryName.toLowerCase()) || 0;
+    usedNames.set(entryName.toLowerCase(), seenCount + 1);
+    if (seenCount > 0) {
+      const dotIdx = entryName.lastIndexOf('.');
+      if (dotIdx > 0) {
+        entryName = `${entryName.slice(0, dotIdx)}-${seenCount}${entryName.slice(dotIdx)}`;
+      } else {
+        entryName = `${entryName}-${seenCount}`;
+      }
+    }
+
+    if (file.encrypted && file.encryptedPayload) {
+      const envelopeJson = JSON.stringify(
+        {
+          relaydropZeroKnowledgeEnvelope: '1.0',
+          fileId: file.id,
+          fileName: file.name,
+          cipherSuite: file.encryptionAlgo || 'AES-256-GCM · PBKDF2-SHA256',
+          ivBase64: file.encryptionIv,
+          saltBase64: file.encryptionSalt,
+          sha256CiphertextFingerprint: file.encryptionFingerprint,
+          ciphertextBase64: file.encryptedPayload,
+          keyHint: file.keyHint,
+        },
+        null,
+        2
+      );
+      zip.file(`${entryName}.enc.json`, Buffer.from(envelopeJson, 'utf-8'));
+      continue;
+    }
+
+    if (file.localAssetPath && fs.existsSync(file.localAssetPath)) {
+      try {
+        const assetBuf = fs.readFileSync(file.localAssetPath);
+        zip.file(entryName, assetBuf);
+        continue;
+      } catch {
+        // Fallback below
+      }
+    }
+
+    if (file.dataUrl && file.dataUrl.startsWith('data:')) {
+      const matches = file.dataUrl.match(/^data:([^;]+);base64,(.+)$/);
+      if (matches && matches[2]) {
+        zip.file(entryName, Buffer.from(matches[2], 'base64'));
+        continue;
+      }
+    }
+
+    if (typeof file.textContent === 'string') {
+      zip.file(entryName, Buffer.from(file.textContent, 'utf-8'));
+      continue;
+    }
+
+    const fallbackContent = [
+      `RelayDrop Bundled File Payload: ${file.name}`,
+      `File ID: ${file.id}`,
+      `Category: ${file.category}`,
+      `MIME Type: ${file.mimeType}`,
+      `Original Size: ${file.size} bytes`,
+      `Uploaded At: ${file.uploadedAt}`,
+      `Room Code: ${file.roomCode}`,
+      file.notes ? `Notes: ${file.notes}` : '',
+    ]
+      .filter(Boolean)
+      .join('\n');
+    zip.file(entryName, Buffer.from(fallbackContent, 'utf-8'));
+  }
+
+  const manifestJson = JSON.stringify(
+    {
+      relaydropShareBundleManifest: '1.0',
+      bundleId: bundleMeta.bundleId,
+      archiveName: bundleMeta.archiveName,
+      roomCode: bundleMeta.roomCode,
+      createdBy: bundleMeta.createdBy,
+      createdAt: bundleMeta.createdAt,
+      expiresAt: bundleMeta.expiresAt,
+      ttlMinutes: bundleMeta.ttlMinutes,
+      fileCount: files.length,
+      files: files.map((f) => ({
+        id: f.id,
+        name: f.name,
+        size: f.size,
+        mimeType: f.mimeType,
+        category: f.category,
+        encrypted: Boolean(f.encrypted),
+        pinProtected: Boolean(f.pinProtected),
+        uploadedAt: f.uploadedAt,
+      })),
+    },
+    null,
+    2
+  );
+  zip.file('RELAYDROP_BUNDLE_MANIFEST.json', Buffer.from(manifestJson, 'utf-8'));
+
+  return zip.generateAsync({
+    type: 'nodebuffer',
+    compression: 'DEFLATE',
+    compressionOptions: { level: 6 },
+  });
+}
+
 async function startServer() {
   const app = express();
   const httpServer = createServer(app);
@@ -518,6 +760,7 @@ async function startServer() {
                 categories: Array.from(categoriesStore.values()),
                 peers: Array.from(peersStore.values()),
                 activities: activityStore,
+                bundles: Array.from(bundlesStore.values()).map(sanitizeBundleForClient),
               },
             })
           );
@@ -584,6 +827,7 @@ async function startServer() {
       categories: Array.from(categoriesStore.values()),
       peers: Array.from(peersStore.values()),
       activities: activityStore,
+      bundles: Array.from(bundlesStore.values()).map(sanitizeBundleForClient),
     });
   });
 
@@ -652,7 +896,60 @@ async function startServer() {
       return;
     }
 
-    const category = String(body.category || 'Documents').trim() || 'Documents';
+    const rawFileName = String(body.name).trim();
+    const rawMimeType = String(body.mimeType || 'application/octet-stream');
+    const inferServerCategory = (name: string, mime: string): string => {
+      const lower = name.toLowerCase();
+      const lowerMime = mime.toLowerCase();
+      if (
+        /(2025-report|2026-report|annual-report|report|financial|invoice|budget|receipt|ledger|payroll|tax|expense|revenue|forecast|bom|earnings)/i.test(
+          lower
+        ) ||
+        /\.(csv|tsv|xlsx|xls|numbers|qbo)$/.test(lower)
+      ) {
+        return 'Financials';
+      }
+      if (
+        /(wireframe|mockup|prototype|figma|sketch|vector|logo|icon|palette|lidar|mesh|cad)/i.test(
+          lower
+        ) ||
+        /\.(fig|sketch|svg|ai|psd|blend|obj|stl)$/.test(lower)
+      ) {
+        return 'Design Assets';
+      }
+      if (
+        /(voice-memo|podcast|interview|recording|audio|voice)/i.test(lower) ||
+        lowerMime.startsWith('audio/') ||
+        /\.(mp3|wav|flac|m4a|ogg|aac)$/.test(lower)
+      ) {
+        return 'Audio & Voice';
+      }
+      if (
+        /(screenshot|camera|photo|portrait|headshot|wallpaper|timelapse)/i.test(
+          lower
+        ) ||
+        lowerMime.startsWith('image/') ||
+        lowerMime.startsWith('video/') ||
+        /\.(jpg|jpeg|png|webp|gif|heic|mp4|mov|webm)$/.test(lower)
+      ) {
+        return 'Photos & Media';
+      }
+      if (
+        /(source-code|backup|bundle|release|package|config|schema|firmware|script|sdk)/i.test(
+          lower
+        ) ||
+        /\.(zip|tar|gz|7z|rar|json|ts|tsx|js|py|go|rs|html|css|sh|yaml|yml)$/.test(
+          lower
+        )
+      ) {
+        return 'Archives & Code';
+      }
+      return 'Documents';
+    };
+
+    const category =
+      String(body.category || '').trim() ||
+      inferServerCategory(rawFileName, rawMimeType);
     categoriesStore.add(category);
 
     const nowIso = body.uploadedAt ? new Date(body.uploadedAt).toISOString() : new Date().toISOString();
@@ -676,6 +973,17 @@ async function startServer() {
       pinCode: body.pinCode ? String(body.pinCode).trim() : undefined,
       pinned: Boolean(body.pinned),
       pinnedAt: body.pinned ? String(body.pinnedAt || nowIso) : undefined,
+      favorite: Boolean(body.favorite),
+      favoritedAt: body.favorite ? String(body.favoritedAt || nowIso) : undefined,
+      encrypted: Boolean(body.encrypted),
+      encryptionAlgo: body.encryptionAlgo ? String(body.encryptionAlgo) : undefined,
+      encryptionIv: body.encryptionIv ? String(body.encryptionIv) : undefined,
+      encryptionSalt: body.encryptionSalt ? String(body.encryptionSalt) : undefined,
+      encryptionFingerprint: body.encryptionFingerprint
+        ? String(body.encryptionFingerprint)
+        : undefined,
+      encryptedPayload: body.encryptedPayload ? String(body.encryptedPayload) : undefined,
+      keyHint: body.keyHint ? String(body.keyHint).trim() : undefined,
       notes: body.notes ? String(body.notes).trim() : undefined,
       previewUrl: body.previewUrl || undefined,
       textContent: body.textContent || undefined,
@@ -696,8 +1004,8 @@ async function startServer() {
       actorRole: caller.role,
       roomCode: newFile.roomCode,
       details: `Uploaded "${newFile.name}" to ${newFile.category}${
-        newFile.pinProtected ? ' (PIN-protected)' : ''
-      }`,
+        newFile.encrypted ? ' (E2EE AES-256-GCM)' : ''
+      }${newFile.pinProtected ? ' (PIN-protected)' : ''}`,
     });
 
     broadcast('file:created', {
@@ -723,7 +1031,12 @@ async function startServer() {
       return;
     }
 
-    if (caller.role === 'viewer') {
+    const updates = req.body || {};
+    const isFavoriteOnlyUpdate =
+      Object.keys(updates).length > 0 &&
+      Object.keys(updates).every((k) => k === 'favorite' || k === 'favoritedAt');
+
+    if (!isFavoriteOnlyUpdate && caller.role === 'viewer') {
       res.status(403).json({
         error: 'Authorization denied: Viewer role cannot modify file metadata or categories.',
       });
@@ -731,6 +1044,7 @@ async function startServer() {
     }
 
     if (
+      !isFavoriteOnlyUpdate &&
       caller.role !== 'admin' &&
       existing.ownerUid &&
       caller.uid &&
@@ -741,11 +1055,10 @@ async function startServer() {
       });
       return;
     }
-
-    const updates = req.body || {};
     const prevCategory = existing.category;
     const prevName = existing.name;
     const prevPinned = Boolean(existing.pinned);
+    const prevFavorite = Boolean(existing.favorite);
     const prevUploadDate = existing.uploadDate;
     const prevNotes = existing.notes || '';
 
@@ -861,6 +1174,90 @@ async function startServer() {
         );
       }
     }
+    if (typeof updates.favorite === 'boolean') {
+      existing.favorite = updates.favorite;
+      existing.favoritedAt = updates.favorite
+        ? typeof updates.favoritedAt === 'string' && updates.favoritedAt.trim()
+          ? updates.favoritedAt.trim()
+          : new Date().toISOString()
+        : undefined;
+      if (updates.favorite !== prevFavorite) {
+        createdActivities.push(
+          appendActivityLog({
+            action: 'pin_toggle',
+            fileId: existing.id,
+            fileName: existing.name,
+            fileSize: existing.size,
+            category: existing.category,
+            actorName: caller.name,
+            actorDevice: caller.device,
+            actorRole: caller.role,
+            roomCode: existing.roomCode || caller.room,
+            details: updates.favorite
+              ? `Added "${existing.name}" to Favorites`
+              : `Removed "${existing.name}" from Favorites`,
+          })
+        );
+      }
+    }
+    if (typeof updates.encrypted === 'boolean') {
+      const prevEncrypted = Boolean(existing.encrypted);
+      existing.encrypted = updates.encrypted;
+      if (updates.encrypted) {
+        existing.encryptionAlgo =
+          typeof updates.encryptionAlgo === 'string'
+            ? updates.encryptionAlgo
+            : 'AES-256-GCM · PBKDF2-SHA256';
+        existing.encryptionIv =
+          typeof updates.encryptionIv === 'string' ? updates.encryptionIv : undefined;
+        existing.encryptionSalt =
+          typeof updates.encryptionSalt === 'string' ? updates.encryptionSalt : undefined;
+        existing.encryptionFingerprint =
+          typeof updates.encryptionFingerprint === 'string'
+            ? updates.encryptionFingerprint
+            : undefined;
+        existing.encryptedPayload =
+          typeof updates.encryptedPayload === 'string'
+            ? updates.encryptedPayload
+            : undefined;
+        existing.keyHint =
+          typeof updates.keyHint === 'string' ? updates.keyHint.trim() : existing.keyHint;
+        existing.textContent = undefined;
+        existing.dataUrl = undefined;
+        existing.previewUrl = undefined;
+      } else {
+        existing.encryptionAlgo = undefined;
+        existing.encryptionIv = undefined;
+        existing.encryptionSalt = undefined;
+        existing.encryptionFingerprint = undefined;
+        existing.encryptedPayload = undefined;
+        existing.keyHint = undefined;
+        if (typeof updates.textContent === 'string') {
+          existing.textContent = updates.textContent;
+        }
+        if (typeof updates.dataUrl === 'string') {
+          existing.dataUrl = updates.dataUrl;
+        }
+      }
+      if (updates.encrypted !== prevEncrypted) {
+        createdActivities.push(
+          appendActivityLog({
+            action: 'pin_toggle',
+            fileId: existing.id,
+            fileName: existing.name,
+            fileSize: existing.size,
+            category: existing.category,
+            actorName: caller.name,
+            actorDevice: caller.device,
+            actorRole: caller.role,
+            roomCode: existing.roomCode || caller.room,
+            details: updates.encrypted
+              ? `Encrypted "${existing.name}" with client-side AES-256-GCM`
+              : `Decrypted and removed E2EE wrapper on "${existing.name}"`,
+          })
+        );
+      }
+    }
 
     filesStore.set(id, existing);
     const clientFile = sanitizeFileForClient(existing);
@@ -931,6 +1328,423 @@ async function startServer() {
       count: deletedIds.length,
       activities: createdActivities,
     });
+  });
+
+  app.post('/api/files/batch-download', (req, res) => {
+    const caller = getCallerAuth(req);
+    const ids: string[] = Array.isArray(req.body?.ids)
+      ? req.body.ids.map((id: unknown) => String(id))
+      : [];
+    const archiveName = String(
+      req.body?.archiveName || `relaydrop-vault-batch-${ids.length}-files.zip`
+    ).trim();
+
+    const updatedFiles: Omit<SharedFileRecord, 'pinCode' | 'localAssetPath'>[] = [];
+    const downloadedNames: string[] = [];
+    let totalBatchBytes = 0;
+
+    for (const id of ids) {
+      const target = filesStore.get(id);
+      if (target) {
+        target.downloads = (target.downloads || 0) + 1;
+        filesStore.set(id, target);
+        const sanitized = sanitizeFileForClient(target);
+        updatedFiles.push(sanitized);
+        downloadedNames.push(target.name);
+        totalBatchBytes += target.size || 0;
+        broadcast('file:updated', {
+          file: sanitized,
+          categories: Array.from(categoriesStore.values()),
+        });
+      }
+    }
+
+    let activity: ActivityLogRecord | undefined;
+    if (updatedFiles.length > 0) {
+      const previewNames =
+        downloadedNames.length <= 3
+          ? downloadedNames.map((n) => `"${n}"`).join(', ')
+          : `${downloadedNames
+              .slice(0, 2)
+              .map((n) => `"${n}"`)
+              .join(', ')} + ${downloadedNames.length - 2} more`;
+
+      activity = appendActivityLog({
+        action: 'download',
+        fileId: updatedFiles[0].id,
+        fileName: archiveName,
+        fileSize: totalBatchBytes,
+        category:
+          updatedFiles.length === 1 ? updatedFiles[0].category : 'Archives & Code',
+        actorName: caller.name,
+        actorDevice: caller.device,
+        actorRole: caller.role,
+        roomCode: caller.room,
+        details: `Batch downloaded ${updatedFiles.length} ${
+          updatedFiles.length === 1 ? 'file' : 'files'
+        } as ZIP (${previewNames})`,
+      });
+      broadcast('activity:created', activity);
+    }
+
+    res.json({
+      ok: true,
+      files: updatedFiles,
+      activity,
+    });
+  });
+
+  // Expiring Multi-File Share Bundle Endpoints
+  const handleCreateBundle = async (req: express.Request, res: express.Response) => {
+    try {
+      const caller = getCallerAuth(req);
+      if (caller.role === 'viewer') {
+        res.status(403).json({
+          error: 'Authorization denied: Viewer role cannot create shareable file bundles.',
+        });
+        return;
+      }
+
+      const ids: string[] = Array.isArray(req.body?.ids)
+        ? req.body.ids.map((id: unknown) => String(id))
+        : [];
+      if (ids.length === 0) {
+        res.status(400).json({ error: 'Select at least one file to bundle.' });
+        return;
+      }
+
+      const selectedFiles: SharedFileRecord[] = [];
+      for (const id of ids) {
+        const found = filesStore.get(id);
+        if (found) {
+          selectedFiles.push(found);
+        }
+      }
+
+      // Fallback if client provided file snapshots for any client-only items
+      if (selectedFiles.length === 0 && Array.isArray(req.body?.files)) {
+        for (const raw of req.body.files) {
+          if (raw && raw.id && raw.name) {
+            selectedFiles.push({
+              id: String(raw.id),
+              name: String(raw.name),
+              size: Number(raw.size) || 0,
+              mimeType: String(raw.mimeType || 'application/octet-stream'),
+              category: String(raw.category || 'Documents'),
+              uploadedAt: String(raw.uploadedAt || new Date().toISOString()),
+              uploadDate: String(raw.uploadDate || new Date().toISOString().slice(0, 10)),
+              senderName: String(raw.senderName || caller.name),
+              senderDevice: String(raw.senderDevice || caller.device),
+              roomCode: String(raw.roomCode || caller.room),
+              downloads: Number(raw.downloads) || 0,
+              pinProtected: Boolean(raw.pinProtected),
+              encrypted: Boolean(raw.encrypted),
+              encryptionAlgo: raw.encryptionAlgo,
+              encryptionIv: raw.encryptionIv,
+              encryptionSalt: raw.encryptionSalt,
+              encryptionFingerprint: raw.encryptionFingerprint,
+              encryptedPayload: raw.encryptedPayload,
+              keyHint: raw.keyHint,
+              textContent: raw.textContent,
+              dataUrl: raw.dataUrl,
+            });
+          }
+        }
+      }
+
+      if (selectedFiles.length === 0) {
+        res.status(404).json({ error: 'None of the selected files were found in the vault.' });
+        return;
+      }
+
+      const rawTtl = Number(req.body?.ttlMinutes);
+      const ttlMinutes =
+        !Number.isNaN(rawTtl) && rawTtl >= 1 && rawTtl <= 43200 ? Math.round(rawTtl) : 60;
+
+      const bundleId =
+        typeof req.body?.id === 'string' && /^bndl-[a-zA-Z0-9_-]{4,40}$/.test(req.body.id)
+          ? req.body.id
+          : `bndl-${crypto.randomBytes(5).toString('hex')}`;
+
+      const nowMs = Date.now();
+      const createdAt = new Date(nowMs).toISOString();
+      const expiresAt = new Date(nowMs + ttlMinutes * 60 * 1000).toISOString();
+
+      const rawArchiveName = String(
+        req.body?.archiveName ||
+          `relaydrop-bundle-${selectedFiles.length}-${
+            selectedFiles.length === 1 ? 'file' : 'files'
+          }-${bundleId.slice(5, 11)}.zip`
+      ).trim();
+      const archiveName = rawArchiveName.endsWith('.zip')
+        ? rawArchiveName
+        : `${rawArchiveName}.zip`;
+
+      const originHeader = String(
+        req.body?.origin ||
+          req.headers.origin ||
+          `${req.headers['x-forwarded-proto'] || req.protocol}://${req.get('host')}`
+      ).replace(/\/+$/, '');
+
+      const zipBuffer = await buildZipBufferForFiles(selectedFiles, {
+        bundleId,
+        archiveName,
+        roomCode: caller.room,
+        createdBy: caller.name,
+        createdAt,
+        expiresAt,
+        ttlMinutes,
+      });
+
+      const totalBytes = selectedFiles.reduce((acc, f) => acc + (f.size || 0), 0);
+      const shareUrl = `${originHeader}/?bundle=${encodeURIComponent(bundleId)}`;
+      const downloadUrl = `${originHeader}/api/bundles/${encodeURIComponent(bundleId)}/download`;
+
+      const bundleRecord: SharedBundleRecord = {
+        id: bundleId,
+        archiveName,
+        roomCode: caller.room,
+        createdBy: caller.name,
+        ownerUid: caller.uid || 'anonymous-peer',
+        createdByDevice: caller.device,
+        createdAt,
+        expiresAt,
+        ttlMinutes,
+        fileIds: selectedFiles.map((f) => f.id),
+        fileNames: selectedFiles.map((f) => f.name),
+        fileCount: selectedFiles.length,
+        totalBytes,
+        bundleZipBytes: zipBuffer.byteLength,
+        downloads: 0,
+        revoked: false,
+        shareUrl,
+        downloadUrl,
+        zipBuffer,
+      };
+
+      bundlesStore.set(bundleId, bundleRecord);
+      const clientBundle = sanitizeBundleForClient(bundleRecord);
+
+      const previewNames =
+        bundleRecord.fileNames.length <= 3
+          ? bundleRecord.fileNames.map((n) => `"${n}"`).join(', ')
+          : `${bundleRecord.fileNames
+              .slice(0, 2)
+              .map((n) => `"${n}"`)
+              .join(', ')} + ${bundleRecord.fileNames.length - 2} more`;
+
+      const ttlLabel =
+        ttlMinutes >= 1440
+          ? `${Math.round(ttlMinutes / 1440)}d`
+          : ttlMinutes >= 60
+          ? `${Math.round(ttlMinutes / 60)}h`
+          : `${ttlMinutes}m`;
+
+      const activity = appendActivityLog({
+        action: 'download',
+        fileId: selectedFiles[0].id,
+        fileName: archiveName,
+        fileSize: totalBytes,
+        category: 'Archives & Code',
+        actorName: caller.name,
+        actorDevice: caller.device,
+        actorRole: caller.role,
+        roomCode: caller.room,
+        details: `Created expiring share bundle (${ttlLabel} TTL) for ${
+          selectedFiles.length
+        } ${selectedFiles.length === 1 ? 'file' : 'files'} (${previewNames})`,
+      });
+
+      broadcast('bundle:created', { bundle: clientBundle, activity });
+      broadcast('activity:created', activity);
+
+      res.status(201).json({
+        ok: true,
+        bundle: clientBundle,
+        activity,
+      });
+    } catch (err) {
+      console.error('Error creating file bundle:', err);
+      res.status(500).json({
+        error: 'Failed to bundle selected files on the server.',
+      });
+    }
+  };
+
+  app.post('/api/bundles/create', handleCreateBundle);
+  app.post('/api/bundles', handleCreateBundle);
+
+  app.get('/api/bundles', (_req, res) => {
+    res.json({
+      bundles: Array.from(bundlesStore.values()).map(sanitizeBundleForClient),
+    });
+  });
+
+  app.get('/api/bundles/:bundleId', (req, res) => {
+    const { bundleId } = req.params;
+    const bundle = bundlesStore.get(bundleId);
+    if (!bundle) {
+      res.status(404).json({ error: 'Share bundle not found on server.' });
+      return;
+    }
+    const isExpired = new Date(bundle.expiresAt).getTime() <= Date.now();
+    const includedFiles = bundle.fileIds
+      .map((fid) => filesStore.get(fid))
+      .filter((f): f is SharedFileRecord => Boolean(f))
+      .map(sanitizeFileForClient);
+
+    res.json({
+      bundle: sanitizeBundleForClient(bundle),
+      expired: isExpired,
+      revoked: bundle.revoked,
+      files: includedFiles,
+    });
+  });
+
+  app.patch('/api/bundles/:bundleId', (req, res) => {
+    const caller = getCallerAuth(req);
+    if (caller.role === 'viewer') {
+      res.status(403).json({
+        error: 'Authorization denied: Viewer role cannot modify shareable bundles.',
+      });
+      return;
+    }
+
+    const { bundleId } = req.params;
+    const bundle = bundlesStore.get(bundleId);
+    if (!bundle) {
+      res.status(404).json({ error: 'Share bundle not found.' });
+      return;
+    }
+
+    if (typeof req.body?.revoked === 'boolean') {
+      bundle.revoked = req.body.revoked;
+    }
+    if (typeof req.body?.expiresAt === 'string' && req.body.expiresAt.trim()) {
+      bundle.expiresAt = req.body.expiresAt.trim();
+    }
+    if (typeof req.body?.ttlMinutes === 'number' && req.body.ttlMinutes >= 1) {
+      bundle.ttlMinutes = Math.round(req.body.ttlMinutes);
+    }
+
+    bundlesStore.set(bundleId, bundle);
+    const clientBundle = sanitizeBundleForClient(bundle);
+    broadcast('bundle:updated', { bundle: clientBundle });
+
+    res.json({
+      ok: true,
+      bundle: clientBundle,
+    });
+  });
+
+  app.get('/api/bundles/:bundleId/download', async (req, res) => {
+    try {
+      const { bundleId } = req.params;
+      let bundle = bundlesStore.get(bundleId);
+
+      // Rehydrate on the fly if server restarted and Firestore metadata query params are provided
+      if (!bundle && typeof req.query.fileIds === 'string' && req.query.fileIds.trim()) {
+        const queryIds = req.query.fileIds
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean);
+        const queryExpiresAt = String(
+          req.query.expiresAt || new Date(Date.now() + 3600000).toISOString()
+        );
+        const queryRevoked = req.query.revoked === 'true';
+        if (queryRevoked) {
+          res
+            .status(410)
+            .send('This temporary shareable bundle link has been revoked by its creator.');
+          return;
+        }
+        if (new Date(queryExpiresAt).getTime() <= Date.now()) {
+          res
+            .status(410)
+            .send(`This temporary shareable bundle link expired at ${queryExpiresAt}.`);
+          return;
+        }
+        const matchedFiles = queryIds
+          .map((id) => filesStore.get(id))
+          .filter((f): f is SharedFileRecord => Boolean(f));
+        if (matchedFiles.length > 0) {
+          const archiveName = String(
+            req.query.archiveName || `relaydrop-bundle-${bundleId}.zip`
+          );
+          const zipBuffer = await buildZipBufferForFiles(matchedFiles, {
+            bundleId,
+            archiveName,
+            roomCode: matchedFiles[0].roomCode || '842-910',
+            createdBy: String(req.query.createdBy || 'RelayDrop Peer'),
+            createdAt: new Date().toISOString(),
+            expiresAt: queryExpiresAt,
+            ttlMinutes: 60,
+          });
+          const safeArchive = archiveName.replace(/[^a-zA-Z0-9._-]/g, '_');
+          res.setHeader('Content-Disposition', `attachment; filename="${safeArchive}"`);
+          res.setHeader('Content-Type', 'application/zip');
+          res.send(zipBuffer);
+          return;
+        }
+      }
+
+      if (!bundle) {
+        res.status(404).send('Share bundle not found or no longer available.');
+        return;
+      }
+
+      if (bundle.revoked) {
+        res
+          .status(410)
+          .send('This temporary shareable bundle link has been revoked by its creator.');
+        return;
+      }
+
+      if (new Date(bundle.expiresAt).getTime() <= Date.now()) {
+        res
+          .status(410)
+          .send(`This temporary shareable bundle link expired at ${bundle.expiresAt}.`);
+        return;
+      }
+
+      bundle.downloads += 1;
+      bundlesStore.set(bundleId, bundle);
+
+      for (const fid of bundle.fileIds) {
+        const target = filesStore.get(fid);
+        if (target) {
+          target.downloads = (target.downloads || 0) + 1;
+          filesStore.set(fid, target);
+          broadcast('file:updated', {
+            file: sanitizeFileForClient(target),
+            categories: Array.from(categoriesStore.values()),
+          });
+        }
+      }
+
+      const dlActivity = appendActivityLog({
+        action: 'download',
+        fileId: bundle.fileIds[0],
+        fileName: bundle.archiveName,
+        fileSize: bundle.totalBytes,
+        category: 'Archives & Code',
+        actorName: String(req.query.actor || 'Share Link Recipient'),
+        actorDevice: 'Temporary Share Link',
+        roomCode: bundle.roomCode,
+        details: `Downloaded temporary bundle "${bundle.archiveName}" (${bundle.fileCount} files, Download #${bundle.downloads})`,
+      });
+
+      broadcast('bundle:updated', { bundle: sanitizeBundleForClient(bundle) });
+      broadcast('activity:created', dlActivity);
+
+      const safeArchive = bundle.archiveName.replace(/[^a-zA-Z0-9._-]/g, '_');
+      res.setHeader('Content-Disposition', `attachment; filename="${safeArchive}"`);
+      res.setHeader('Content-Type', 'application/zip');
+      res.send(bundle.zipBuffer);
+    } catch (err) {
+      console.error('Error downloading bundle:', err);
+      res.status(500).send('Failed to download bundle archive.');
+    }
   });
 
   app.delete('/api/files/:id', (req, res) => {
@@ -1053,6 +1867,30 @@ async function startServer() {
 
     if (typeof file.textContent === 'string') {
       res.send(Buffer.from(file.textContent, 'utf-8'));
+      return;
+    }
+
+    if (file.encrypted && file.encryptedPayload) {
+      const envelopeJson = JSON.stringify(
+        {
+          relaydropZeroKnowledgeEnvelope: '1.0',
+          fileId: file.id,
+          fileName: file.name,
+          cipherSuite: file.encryptionAlgo || 'AES-256-GCM · PBKDF2-SHA256',
+          ivBase64: file.encryptionIv,
+          saltBase64: file.encryptionSalt,
+          sha256CiphertextFingerprint: file.encryptionFingerprint,
+          ciphertextBase64: file.encryptedPayload,
+        },
+        null,
+        2
+      );
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename="${safeFilename}.enc.json"`
+      );
+      res.setHeader('Content-Type', 'application/json');
+      res.send(Buffer.from(envelopeJson, 'utf-8'));
       return;
     }
 

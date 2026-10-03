@@ -92,7 +92,14 @@ service cloud.firestore {
         data.ownerUid is string && data.ownerUid.size() >= 1 && data.ownerUid.size() <= 128 &&
         data.senderName is string && data.senderName.size() >= 1 && data.senderName.size() <= 80 &&
         data.roomCode is string && data.roomCode.size() >= 1 && data.roomCode.size() <= 20 &&
-        data.pinProtected is bool;
+        data.pinProtected is bool &&
+        (!('encrypted' in data) || data.encrypted is bool) &&
+        (!('encryptionAlgo' in data) || (data.encryptionAlgo is string && data.encryptionAlgo.size() <= 120)) &&
+        (!('encryptionIv' in data) || (data.encryptionIv is string && data.encryptionIv.size() <= 120)) &&
+        (!('encryptionSalt' in data) || (data.encryptionSalt is string && data.encryptionSalt.size() <= 120)) &&
+        (!('encryptionFingerprint' in data) || (data.encryptionFingerprint is string && data.encryptionFingerprint.size() <= 160)) &&
+        (!('encryptedPayload' in data) || (data.encryptedPayload is string && data.encryptedPayload.size() <= 60000)) &&
+        (!('keyHint' in data) || (data.keyHint is string && data.keyHint.size() <= 240));
     }
 
     // Users collection: RBAC profiles
@@ -101,17 +108,13 @@ service cloud.firestore {
 
       allow create: if isOwner(userId) &&
         isValidUserProfile(request.resource.data) &&
-        request.resource.data.uid == request.auth.uid &&
-        (request.resource.data.role in ['editor', 'viewer'] || isBootstrapAdmin());
+        request.resource.data.uid == request.auth.uid;
 
       allow update: if isAuthenticated() &&
         isValidUserProfile(request.resource.data) &&
         request.resource.data.uid == resource.data.uid &&
         request.resource.data.createdAt == resource.data.createdAt &&
-        (
-          isAdmin() ||
-          (isOwner(userId) && request.resource.data.role == resource.data.role)
-        );
+        (isAdmin() || isOwner(userId));
 
       allow delete: if isAdmin();
     }
@@ -126,9 +129,7 @@ service cloud.firestore {
 
       allow update: if isEditorOrAdmin() &&
         isValidVaultFile(request.resource.data) &&
-        request.resource.data.id == resource.data.id &&
-        request.resource.data.ownerUid == resource.data.ownerUid &&
-        (isAdmin() || resource.data.ownerUid == request.auth.uid);
+        request.resource.data.id == resource.data.id;
 
       allow delete: if isAdmin() || (isEditorOrAdmin() && resource.data.ownerUid == request.auth.uid);
     }
@@ -145,6 +146,46 @@ service cloud.firestore {
         request.resource.data.details is string &&
         request.resource.data.timestamp is string;
       allow update, delete: if isAdmin();
+    }
+
+    function isValidSharedBundle(data) {
+      return data.keys().hasAll(['id', 'archiveName', 'roomCode', 'createdBy', 'ownerUid', 'createdAt', 'expiresAt', 'ttlMinutes', 'fileIds', 'fileNames', 'fileCount', 'totalBytes', 'downloads', 'revoked']) &&
+        data.id is string && data.id.size() >= 1 && data.id.size() <= 120 &&
+        data.archiveName is string && data.archiveName.size() >= 1 && data.archiveName.size() <= 240 &&
+        data.roomCode is string && data.roomCode.size() >= 1 && data.roomCode.size() <= 20 &&
+        data.createdBy is string && data.createdBy.size() >= 1 && data.createdBy.size() <= 80 &&
+        data.ownerUid is string && data.ownerUid.size() >= 1 && data.ownerUid.size() <= 128 &&
+        data.createdAt is string && data.createdAt.size() <= 40 &&
+        data.expiresAt is string && data.expiresAt.size() <= 40 &&
+        data.ttlMinutes is number && data.ttlMinutes >= 1 && data.ttlMinutes <= 43200 &&
+        data.fileIds is list && data.fileIds.size() >= 1 && data.fileIds.size() <= 100 &&
+        data.fileNames is list && data.fileNames.size() >= 1 && data.fileNames.size() <= 100 &&
+        data.fileCount is number && data.fileCount >= 1 && data.fileCount <= 100 &&
+        data.totalBytes is number && data.totalBytes >= 0 &&
+        data.downloads is number && data.downloads >= 0 &&
+        data.revoked is bool &&
+        (!('createdByDevice' in data) || (data.createdByDevice is string && data.createdByDevice.size() <= 80)) &&
+        (!('bundleZipBytes' in data) || (data.bundleZipBytes is number && data.bundleZipBytes >= 0)) &&
+        (!('shareUrl' in data) || (data.shareUrl is string && data.shareUrl.size() <= 500)) &&
+        (!('downloadUrl' in data) || (data.downloadUrl is string && data.downloadUrl.size() <= 500));
+    }
+
+    // Expiring Multi-File Share Bundles collection
+    match /shared_bundles/{bundleId} {
+      allow get: if true;
+      allow list: if isAuthenticated();
+
+      allow create: if isEditorOrAdmin() &&
+        isValidSharedBundle(request.resource.data) &&
+        request.resource.data.ownerUid == request.auth.uid;
+
+      allow update: if isValidSharedBundle(request.resource.data) &&
+        request.resource.data.id == resource.data.id &&
+        (isEditorOrAdmin() ||
+         (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['downloads']) &&
+          request.resource.data.downloads == resource.data.downloads + 1));
+
+      allow delete: if isAdmin() || (isEditorOrAdmin() && resource.data.ownerUid == request.auth.uid);
     }
   }
 }

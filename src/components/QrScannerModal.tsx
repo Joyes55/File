@@ -16,6 +16,7 @@ import {
   ExternalLink,
   AlertCircle,
   Eye,
+  History,
 } from 'lucide-react';
 import { SharedFile, formatBytes, formatDisplayDate } from '../types/files';
 import {
@@ -23,6 +24,14 @@ import {
   buildFileQrPayloadUrl,
   downloadFileQrPng,
 } from './QrMatrixSvg';
+import {
+  ScanHistoryLog,
+  ScannedFileHistoryEntry,
+  MAX_SCAN_HISTORY_FILES,
+  loadScanHistory,
+  saveScanHistory,
+  recordFileInScanHistory,
+} from './ScanHistoryLog';
 
 export type ParsedQrResult =
   | {
@@ -142,7 +151,12 @@ export function parseScannedQrPayload(
     };
   }
 
-  if (raw.startsWith('file-')) {
+  if (
+    raw.startsWith('file-') ||
+    raw.startsWith('doc-') ||
+    raw.startsWith('scan-') ||
+    /\.[a-z0-9]{2,5}$/i.test(raw)
+  ) {
     return {
       type: 'file',
       fileId: raw,
@@ -193,6 +207,20 @@ export const QrScannerModal: React.FC<QrScannerModalProps> = ({
   const [autoExecuteOnScan, setAutoExecuteOnScan] = useState<boolean>(true);
   const [manualInput, setManualInput] = useState<string>('');
   const [showSampleGenerator, setShowSampleGenerator] = useState<boolean>(false);
+  const [activeModalTab, setActiveModalTab] = useState<'scanner' | 'history'>('scanner');
+  const [scanHistory, setScanHistory] = useState<ScannedFileHistoryEntry[]>(() =>
+    loadScanHistory(files)
+  );
+
+  // Sync initial seed if files arrive from backend and history hasn't been populated yet
+  useEffect(() => {
+    if (scanHistory.length === 0 && files.length > 0) {
+      const loaded = loadScanHistory(files);
+      if (loaded.length > 0) {
+        setScanHistory(loaded);
+      }
+    }
+  }, [files, scanHistory.length]);
 
   // PIN unlock state when scanning a PIN-protected file QR code
   const [pinInput, setPinInput] = useState<string>('');
@@ -248,19 +276,24 @@ export const QrScannerModal: React.FC<QrScannerModalProps> = ({
           onJoinRoom(parsed.roomCode);
           onNotify(`Scanned QR: Joined Room ${parsed.roomCode}`);
         }
-      } else if (parsed.type === 'file' && parsed.file) {
-        const targetFile = parsed.file;
-        const targetRoom = parsed.roomCode || targetFile.roomCode;
-        if (targetRoom && targetRoom !== currentRoomCode) {
-          onJoinRoom(targetRoom);
-        }
-        const unlockedViaQrPin = Boolean(parsed.pin);
-        setPinVerified(!targetFile.pinProtected || unlockedViaQrPin);
-        if (autoExecuteOnScan && (!targetFile.pinProtected || unlockedViaQrPin)) {
-          triggerBrowserDownload(targetFile, parsed.pin);
-          onNotify(
-            `Scanned File QR: Paired to Room ${targetRoom} & downloading "${targetFile.name}"`
-          );
+      } else if (parsed.type === 'file') {
+        setScanHistory((prev) =>
+          recordFileInScanHistory(prev, parsed, currentRoomCode)
+        );
+        if (parsed.file) {
+          const targetFile = parsed.file;
+          const targetRoom = parsed.roomCode || targetFile.roomCode;
+          if (targetRoom && targetRoom !== currentRoomCode) {
+            onJoinRoom(targetRoom);
+          }
+          const unlockedViaQrPin = Boolean(parsed.pin);
+          setPinVerified(!targetFile.pinProtected || unlockedViaQrPin);
+          if (autoExecuteOnScan && (!targetFile.pinProtected || unlockedViaQrPin)) {
+            triggerBrowserDownload(targetFile, parsed.pin);
+            onNotify(
+              `Scanned File QR: Paired to Room ${targetRoom} & downloading "${targetFile.name}"`
+            );
+          }
         }
       }
     },
@@ -276,7 +309,7 @@ export const QrScannerModal: React.FC<QrScannerModalProps> = ({
 
   // Initialize camera stream and QR frame scanner loop
   useEffect(() => {
-    if (!isOpen) {
+    if (!isOpen || activeModalTab !== 'scanner') {
       stopCameraStream();
       return;
     }
@@ -402,7 +435,7 @@ export const QrScannerModal: React.FC<QrScannerModalProps> = ({
       cancelled = true;
       stopCameraStream();
     };
-  }, [isOpen, facingMode, scannedResult, handleDecodedQrString, stopCameraStream]);
+  }, [isOpen, activeModalTab, facingMode, scannedResult, handleDecodedQrString, stopCameraStream]);
 
   // Reset state when modal opens & listen for Escape key
   useEffect(() => {
@@ -411,6 +444,7 @@ export const QrScannerModal: React.FC<QrScannerModalProps> = ({
       setPinInput('');
       setPinError('');
       setDownloadTriggered(false);
+      setActiveModalTab('scanner');
     }
   }, [isOpen]);
 
@@ -557,6 +591,56 @@ export const QrScannerModal: React.FC<QrScannerModalProps> = ({
           </button>
         </div>
 
+        {/* Scanner / History Navigation Tabs */}
+        <div className="px-5 pt-3 pb-2 bg-slate-50/70 border-b border-slate-100 shrink-0">
+          <div
+            role="tablist"
+            aria-label="QR Scanner Views"
+            className="grid grid-cols-2 gap-1.5 p-1 rounded-2xl bg-slate-200/70"
+          >
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeModalTab === 'scanner'}
+              onClick={() => setActiveModalTab('scanner')}
+              className={`min-h-[38px] px-3.5 py-1.5 rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition-all interactive-press ${
+                activeModalTab === 'scanner'
+                  ? 'bg-white text-slate-900 shadow-xs'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              <Camera className="w-3.5 h-3.5 text-sky-600" />
+              <span>Scanner</span>
+            </button>
+
+            <button
+              type="button"
+              role="tab"
+              data-testid="qr-scanner-history-tab"
+              aria-selected={activeModalTab === 'history'}
+              onClick={() => setActiveModalTab('history')}
+              className={`min-h-[38px] px-3.5 py-1.5 rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition-all interactive-press ${
+                activeModalTab === 'history'
+                  ? 'bg-white text-slate-900 shadow-xs'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              <History className="w-3.5 h-3.5 text-sky-600" />
+              <span>History</span>
+              <span
+                aria-hidden="true"
+                className={`px-1.5 py-0.5 rounded-md font-mono tabular-nums text-[10px] font-bold ${
+                  activeModalTab === 'history'
+                    ? 'bg-sky-600 text-white'
+                    : 'bg-slate-300/80 text-slate-700'
+                }`}
+              >
+                {scanHistory.length}/{MAX_SCAN_HISTORY_FILES}
+              </span>
+            </button>
+          </div>
+        </div>
+
         {/* Scrollable Body */}
         <div className="p-5 overflow-y-auto space-y-5 flex-1">
           {/* Hidden Canvas for jsQR Frame Decoding & File Input for QR Image Upload */}
@@ -569,6 +653,96 @@ export const QrScannerModal: React.FC<QrScannerModalProps> = ({
             className="hidden"
           />
 
+          {activeModalTab === 'history' ? (
+            <ScanHistoryLog
+              entries={scanHistory}
+              files={files}
+              currentRoomCode={currentRoomCode}
+              onQuickDownload={(entry, resolvedFile) => {
+                if (resolvedFile) {
+                  if (entry.roomCode && entry.roomCode !== currentRoomCode) {
+                    onJoinRoom(entry.roomCode);
+                  }
+                  if (resolvedFile.pinProtected) {
+                    setScannedResult({
+                      type: 'file',
+                      fileId: resolvedFile.id,
+                      file: resolvedFile,
+                      roomCode: entry.roomCode || resolvedFile.roomCode,
+                      raw: entry.rawPayload,
+                    });
+                    setPinInput('');
+                    setPinError('');
+                    setPinVerified(false);
+                    setDownloadTriggered(false);
+                    setActiveModalTab('scanner');
+                    onNotify(`Enter PIN to unlock "${resolvedFile.name}"`);
+                    return;
+                  }
+                  triggerBrowserDownload(resolvedFile);
+                  onNotify(`Downloading "${resolvedFile.name}" from Scan History`);
+                } else {
+                  const link = document.createElement('a');
+                  link.href = `/api/files/${encodeURIComponent(entry.fileId)}/download`;
+                  link.download = entry.fileName;
+                  document.body.appendChild(link);
+                  link.click();
+                  document.body.removeChild(link);
+                  onNotify(`Downloading "${entry.fileName}" from Scan History`);
+                }
+              }}
+              onQuickInspect={(fileId, targetRoom) => {
+                if (targetRoom && targetRoom !== currentRoomCode) {
+                  onJoinRoom(targetRoom);
+                }
+                onInspectFile(fileId);
+                onClose();
+              }}
+              onReopenScanResult={(entry) => {
+                const matched = files.find(
+                  (f) =>
+                    f.id.toLowerCase() === entry.fileId.toLowerCase() ||
+                    f.name.toLowerCase() === entry.fileName.toLowerCase()
+                );
+                setScannedResult({
+                  type: 'file',
+                  fileId: matched ? matched.id : entry.fileId,
+                  file: matched,
+                  roomCode: entry.roomCode,
+                  raw: entry.rawPayload,
+                });
+                setPinInput('');
+                setPinError('');
+                setPinVerified(!matched?.pinProtected);
+                setDownloadTriggered(false);
+                setActiveModalTab('scanner');
+              }}
+              onRemoveEntry={(entryId) => {
+                setScanHistory((prev) => {
+                  const next = prev.filter((item) => item.id !== entryId);
+                  saveScanHistory(next);
+                  return next;
+                });
+                onNotify('Removed item from Scan History');
+              }}
+              onClearHistory={() => {
+                setScanHistory([]);
+                saveScanHistory([]);
+                onNotify('Cleared QR Scan History');
+              }}
+              onSwitchToScanner={() => setActiveModalTab('scanner')}
+              onSimulateSampleScan={(sampleFile) => {
+                setActiveModalTab('scanner');
+                handleDecodedQrString(
+                  buildFileQrPayloadUrl({
+                    fileId: sampleFile.id,
+                    roomCode: sampleFile.roomCode || currentRoomCode,
+                  })
+                );
+              }}
+            />
+          ) : (
+            <>
           {/* Viewfinder OR Scanned Result Card */}
           {!scannedResult ? (
             <div className="space-y-4">
@@ -868,6 +1042,21 @@ export const QrScannerModal: React.FC<QrScannerModalProps> = ({
                           </button>
                         </div>
                       )}
+                      <div className="pt-2 border-t border-slate-100 flex items-center justify-between text-xs text-slate-500">
+                        <span className="inline-flex items-center gap-1.5 font-mono text-[11px] text-emerald-700 font-semibold">
+                          <History className="w-3.5 h-3.5 text-emerald-600" />
+                          <span>
+                            Logged to Scan History ({scanHistory.length}/{MAX_SCAN_HISTORY_FILES})
+                          </span>
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setActiveModalTab('history')}
+                          className="font-semibold text-sky-700 hover:text-sky-800"
+                        >
+                          View History →
+                        </button>
+                      </div>
                     </>
                   ) : (
                     <div className="space-y-2">
@@ -1031,6 +1220,8 @@ export const QrScannerModal: React.FC<QrScannerModalProps> = ({
               </button>
             </form>
           </div>
+            </>
+          )}
         </div>
           </motion.div>
         </motion.div>

@@ -106,6 +106,67 @@
           "type": "string",
           "format": "date-time",
           "description": "ISO timestamp when the file was pinned to top."
+        },
+        "favorite": {
+          "type": "boolean",
+          "description": "Whether file is marked as a favorite."
+        },
+        "favoritedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO timestamp when the file was marked as favorite."
+        },
+        "encrypted": {
+          "type": "boolean",
+          "description": "Whether the file payload is end-to-end encrypted with AES-256-GCM."
+        },
+        "encryptionAlgo": {
+          "type": "string",
+          "description": "Cryptographic cipher and key derivation algorithm (AES-256-GCM / PBKDF2-SHA256)."
+        },
+        "encryptionIv": {
+          "type": "string",
+          "description": "Base64-encoded 96-bit initialization vector for AES-GCM."
+        },
+        "encryptionSalt": {
+          "type": "string",
+          "description": "Base64-encoded 128-bit PBKDF2 salt."
+        },
+        "encryptionFingerprint": {
+          "type": "string",
+          "description": "SHA-256 integrity fingerprint of the encrypted envelope."
+        },
+        "encryptedPayload": {
+          "type": "string",
+          "description": "JSON serialized zero-knowledge AES-256-GCM ciphertext envelope."
+        },
+        "keyHint": {
+          "type": "string",
+          "description": "Optional non-secret hint for the decryption passphrase."
+        },
+        "ownerEmail": {
+          "type": "string",
+          "description": "Email of the user who uploaded or synced the file."
+        },
+        "downloads": {
+          "type": "number",
+          "description": "Number of times the file has been downloaded."
+        },
+        "notes": {
+          "type": "string",
+          "description": "Searchable transfer notes attached to the file."
+        },
+        "previewUrl": {
+          "type": "string",
+          "description": "Optional preview asset URL."
+        },
+        "textContent": {
+          "type": "string",
+          "description": "Optional inline text or code content for instant preview."
+        },
+        "dataUrl": {
+          "type": "string",
+          "description": "Optional inline base64 data URL for small assets."
         }
       },
       "required": [
@@ -183,6 +244,103 @@
         }
       },
       "required": ["id", "action", "fileName", "actorName", "roomCode", "details", "timestamp"]
+    },
+    "SharedBundle": {
+      "title": "SharedBundle",
+      "description": "Temporary shareable multi-file bundle record with expiration timestamp.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique bundle identifier."
+        },
+        "archiveName": {
+          "type": "string",
+          "description": "Generated ZIP archive filename for the bundle."
+        },
+        "roomCode": {
+          "type": "string",
+          "description": "6-digit pairing room code."
+        },
+        "createdBy": {
+          "type": "string",
+          "description": "Display name of the user who generated the temporary bundle link."
+        },
+        "ownerUid": {
+          "type": "string",
+          "description": "UID of the user who created the bundle."
+        },
+        "createdByDevice": {
+          "type": "string",
+          "description": "Device label of the creator."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO timestamp when the bundle was generated."
+        },
+        "expiresAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO expiration timestamp after which the link is no longer valid."
+        },
+        "ttlMinutes": {
+          "type": "number",
+          "description": "Time-to-live duration in minutes."
+        },
+        "fileIds": {
+          "type": "array",
+          "description": "Bounded list of bundled file IDs."
+        },
+        "fileNames": {
+          "type": "array",
+          "description": "Bounded list of bundled file names."
+        },
+        "fileCount": {
+          "type": "number",
+          "description": "Number of files in the bundle."
+        },
+        "totalBytes": {
+          "type": "number",
+          "description": "Uncompressed total size in bytes of bundled files."
+        },
+        "bundleZipBytes": {
+          "type": "number",
+          "description": "Compressed ZIP archive size in bytes."
+        },
+        "downloads": {
+          "type": "number",
+          "description": "Number of times the bundle link has been downloaded."
+        },
+        "revoked": {
+          "type": "boolean",
+          "description": "Whether the temporary shareable link has been manually revoked."
+        },
+        "shareUrl": {
+          "type": "string",
+          "description": "Shareable frontend URL for the bundle."
+        },
+        "downloadUrl": {
+          "type": "string",
+          "description": "Backend ZIP download endpoint path."
+        }
+      },
+      "required": [
+        "id",
+        "archiveName",
+        "roomCode",
+        "createdBy",
+        "ownerUid",
+        "createdAt",
+        "expiresAt",
+        "ttlMinutes",
+        "fileIds",
+        "fileNames",
+        "fileCount",
+        "totalBytes",
+        "downloads",
+        "revoked"
+      ]
     }
   },
   "firestore": {
@@ -203,6 +361,12 @@
         "$ref": "#/entities/ActivityLog"
       },
       "description": "Stores chronological audit trail of file uploads, deletions, and category changes."
+    },
+    "/shared_bundles/{bundleId}": {
+      "schema": {
+        "$ref": "#/entities/SharedBundle"
+      },
+      "description": "Stores temporary expiring shareable multi-file bundle links."
     }
   }
 }

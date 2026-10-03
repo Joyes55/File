@@ -31,6 +31,10 @@ import {
   Share2,
   QrCode,
   Pin,
+  ShieldCheck,
+  KeyRound,
+  RefreshCw,
+  Printer,
 } from 'lucide-react';
 import {
   SharedFile,
@@ -39,10 +43,18 @@ import {
   formatDisplayDate,
 } from '../types/files';
 import {
+  decryptFilePayload,
+  encryptFilePayload,
+  EncryptedEnvelopePayload,
+  formatEncryptedEnvelopePreview,
+  generateStrongPassphrase,
+} from '../utils/crypto';
+import {
   QrMatrixSvg,
   buildFileQrPayloadUrl,
   downloadFileQrPng,
   downloadFileQrSvg,
+  printFileQrIndexCard,
 } from './QrMatrixSvg';
 import { TransferProgressBar } from './TransferProgressBar';
 
@@ -67,6 +79,15 @@ interface FileDetailSheetProps {
       notes?: string;
       uploadDate?: string;
       pinned?: boolean;
+      encrypted?: boolean;
+      encryptionAlgo?: string;
+      encryptionIv?: string;
+      encryptionSalt?: string;
+      encryptionFingerprint?: string;
+      encryptedPayload?: string;
+      keyHint?: string;
+      textContent?: string;
+      dataUrl?: string;
     }
   ) => Promise<void>;
   onDeleteFile: (id: string) => Promise<void>;
@@ -334,6 +355,15 @@ export const FileDetailSheet: React.FC<FileDetailSheetProps> = ({
   const [pinInput, setPinInput] = useState('');
   const [pinUnlocked, setPinUnlocked] = useState(false);
   const [pinError, setPinError] = useState('');
+  const [decryptionInput, setDecryptionInput] = useState('');
+  const [decryptedData, setDecryptedData] =
+    useState<EncryptedEnvelopePayload | null>(null);
+  const [decryptionError, setDecryptionError] = useState('');
+  const [isDecrypting, setIsDecrypting] = useState(false);
+  const [showCiphertextInspector, setShowCiphertextInspector] = useState(false);
+  const [inPlacePassphrase, setInPlacePassphrase] = useState('relaydrop-2026');
+  const [inPlaceHint, setInPlaceHint] = useState('');
+  const [showInPlaceEncryptForm, setShowInPlaceEncryptForm] = useState(false);
   const [copiedLink, setCopiedLink] = useState(false);
   const [shareFeedback, setShareFeedback] = useState<string | null>(null);
   const [qrMode, setQrMode] = useState<'room-download' | 'direct-stream'>('room-download');
@@ -375,6 +405,14 @@ export const FileDetailSheet: React.FC<FileDetailSheetProps> = ({
       setPinInput('');
       setPinUnlocked(!file.pinProtected);
       setPinError('');
+      setDecryptionInput('');
+      setDecryptedData(null);
+      setDecryptionError('');
+      setIsDecrypting(false);
+      setShowCiphertextInspector(false);
+      setShowInPlaceEncryptForm(false);
+      setInPlacePassphrase('relaydrop-2026');
+      setInPlaceHint('');
       setCopiedLink(false);
       setShareFeedback(null);
       setQrMode('room-download');
@@ -433,17 +471,28 @@ export const FileDetailSheet: React.FC<FileDetailSheetProps> = ({
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [file, hasPrev, hasNext, onPrevFile, onNextFile, onClose]);
 
+  const effectiveFile = useMemo<SharedFile | null>(() => {
+    if (!file) return null;
+    if (!decryptedData) return file;
+    return {
+      ...file,
+      mimeType: decryptedData.originalMimeType || file.mimeType,
+      textContent: decryptedData.textContent ?? file.textContent,
+      dataUrl: decryptedData.dataUrl ?? file.dataUrl,
+    };
+  }, [file, decryptedData]);
+
   const resolvedText = useMemo(
-    () => (file ? resolveTextContent(file) : undefined),
-    [file]
+    () => (effectiveFile ? resolveTextContent(effectiveFile) : undefined),
+    [effectiveFile]
   );
 
   const imageInfo = useMemo(
     () =>
-      file
-        ? resolveImageSource(file)
+      effectiveFile
+        ? resolveImageSource(effectiveFile)
         : { isImage: false, src: undefined, formatBadge: 'IMAGE' },
-    [file]
+    [effectiveFile]
   );
 
   // Determine if text content is JSON, CSV, Markdown, or general text/code
@@ -633,6 +682,23 @@ export const FileDetailSheet: React.FC<FileDetailSheetProps> = ({
                 }
               };
 
+              const handlePrintQrCard = () => {
+                printFileQrIndexCard({
+                  value: shareUrl,
+                  fileName: file.name,
+                  category: file.category,
+                  sizeLabel: formatBytes(file.size),
+                  roomCode: effectiveRoomCode,
+                  senderName: file.senderName,
+                  uploadDate: file.uploadDate,
+                  encrypted: file.encrypted,
+                  encryptionFingerprint: file.encryptionFingerprint,
+                  pinProtected: file.pinProtected,
+                  notes: file.notes,
+                });
+                triggerQrFeedback('Printing 4×6" Card');
+              };
+
               const handleUnlockPin = async (e: React.FormEvent) => {
                 e.preventDefault();
                 setPinError('');
@@ -656,6 +722,34 @@ export const FileDetailSheet: React.FC<FileDetailSheetProps> = ({
               };
 
               const handleDownload = () => {
+                if (file.encrypted && decryptedData) {
+                  if (decryptedData.dataUrl) {
+                    const link = document.createElement('a');
+                    link.href = decryptedData.dataUrl;
+                    link.download = decryptedData.originalName || file.name;
+                    document.body.appendChild(link);
+                    link.click();
+                    document.body.removeChild(link);
+                    return;
+                  }
+                  if (decryptedData.textContent) {
+                    const blob = new Blob([decryptedData.textContent], {
+                      type:
+                        decryptedData.originalMimeType ||
+                        file.mimeType ||
+                        'text/plain',
+                    });
+                    const url = URL.createObjectURL(blob);
+                    const link = document.createElement('a');
+                    link.href = url;
+                    link.download = decryptedData.originalName || file.name;
+                    document.body.appendChild(link);
+                    link.click();
+                    document.body.removeChild(link);
+                    setTimeout(() => URL.revokeObjectURL(url), 3000);
+                    return;
+                  }
+                }
                 if (onDownloadFile) {
                   onDownloadFile(file, file.pinProtected ? pinInput : undefined);
                   return;
@@ -872,6 +966,117 @@ export const FileDetailSheet: React.FC<FileDetailSheetProps> = ({
                 }
               };
 
+              const handleDecryptInSheet = async (
+                e?: React.FormEvent,
+                overridePass?: string
+              ) => {
+                if (e) e.preventDefault();
+                const pass = (overridePass ?? decryptionInput).trim();
+                if (!pass) {
+                  setDecryptionError('Please enter the decryption passphrase.');
+                  return;
+                }
+                if (
+                  !file.encryptedPayload ||
+                  !file.encryptionIv ||
+                  !file.encryptionSalt
+                ) {
+                  setDecryptionError('Missing encryption envelope metadata.');
+                  return;
+                }
+                setIsDecrypting(true);
+                setDecryptionError('');
+                try {
+                  const unlocked = await decryptFilePayload(
+                    {
+                      encryptedPayload: file.encryptedPayload,
+                      encryptionIv: file.encryptionIv,
+                      encryptionSalt: file.encryptionSalt,
+                    },
+                    pass
+                  );
+                  setDecryptedData(unlocked);
+                  setShowCiphertextInspector(false);
+                } catch (err) {
+                  setDecryptionError(
+                    err instanceof Error
+                      ? err.message
+                      : 'Decryption failed: incorrect passphrase.'
+                  );
+                } finally {
+                  setIsDecrypting(false);
+                }
+              };
+
+              const handleEncryptFileInPlace = async (e: React.FormEvent) => {
+                e.preventDefault();
+                if (!inPlacePassphrase.trim()) return;
+                setIsSaving(true);
+                try {
+                  let sourceDataUrl = file.dataUrl;
+                  if (!sourceDataUrl && imageInfo.src) {
+                    try {
+                      const resp = await fetch(imageInfo.src);
+                      if (resp.ok) {
+                        const blob = await resp.blob();
+                        sourceDataUrl = await new Promise<string>((resolve) => {
+                          const r = new FileReader();
+                          r.onload = () =>
+                            resolve(typeof r.result === 'string' ? r.result : '');
+                          r.onerror = () => resolve('');
+                          r.readAsDataURL(blob);
+                        });
+                      }
+                    } catch {
+                      // Fallback to textContent
+                    }
+                  }
+                  const encResult = await encryptFilePayload(
+                    {
+                      textContent:
+                        resolvedText ||
+                        (!sourceDataUrl
+                          ? `RelayDrop Vault File: ${file.name} (${formatBytes(file.size)})`
+                          : undefined),
+                      dataUrl: sourceDataUrl,
+                      mimeType: file.mimeType,
+                      name: file.name,
+                    },
+                    inPlacePassphrase.trim()
+                  );
+                  await onUpdateFile(file.id, {
+                    encrypted: true,
+                    encryptionAlgo: encResult.encryptionAlgo,
+                    encryptionIv: encResult.encryptionIv,
+                    encryptionSalt: encResult.encryptionSalt,
+                    encryptionFingerprint: encResult.encryptionFingerprint,
+                    encryptedPayload: encResult.encryptedPayload,
+                    keyHint: inPlaceHint.trim() || undefined,
+                  });
+                  setShowInPlaceEncryptForm(false);
+                  setDecryptedData(null);
+                } finally {
+                  setIsSaving(false);
+                }
+              };
+
+              const handleRemoveEncryptionInPlace = async () => {
+                if (!decryptedData) return;
+                setIsSaving(true);
+                try {
+                  await onUpdateFile(file.id, {
+                    encrypted: false,
+                    textContent: decryptedData.textContent,
+                    dataUrl: decryptedData.dataUrl,
+                  });
+                  setDecryptedData(null);
+                } finally {
+                  setIsSaving(false);
+                }
+              };
+
+              const isE2eeLocked = Boolean(file.encrypted && !decryptedData);
+
               return (
                 <>
                   {/* Mobile Drag Handle Affordance */}
@@ -907,6 +1112,14 @@ export const FileDetailSheet: React.FC<FileDetailSheetProps> = ({
                           <>
                             <span className="mx-1.5" aria-hidden="true">·</span>
                             <span className="font-semibold text-amber-700">Pinned</span>
+                          </>
+                        )}
+                        {file.encrypted && (
+                          <>
+                            <span className="mx-1.5" aria-hidden="true">·</span>
+                            <span className="font-mono font-semibold text-emerald-700">
+                              {decryptedData ? 'Decrypted (AES-256)' : 'E2EE Encrypted'}
+                            </span>
                           </>
                         )}
                       </p>
@@ -1081,8 +1294,242 @@ export const FileDetailSheet: React.FC<FileDetailSheetProps> = ({
                           <p className="text-xs font-semibold text-rose-600">{pinError}</p>
                         )}
                       </form>
+                    ) : isE2eeLocked ? (
+                      <div className="p-5 rounded-2xl bg-slate-50 border border-slate-200/90 space-y-4">
+                        <div className="flex items-start gap-3">
+                          <div className="w-10 h-10 rounded-2xl bg-emerald-600 text-white flex items-center justify-center shrink-0">
+                            <ShieldCheck className="w-5 h-5" />
+                          </div>
+                          <div>
+                            <h4 className="text-sm font-bold text-slate-900">
+                              AES-256-GCM Encrypted Vault Payload
+                            </h4>
+                            <p className="text-xs text-slate-600 mt-0.5 leading-relaxed">
+                              Enter the passphrase to derive the 256-bit key via PBKDF2-SHA256 (100,000 iterations) and decrypt this file locally in your browser.
+                            </p>
+                          </div>
+                        </div>
+
+                        <div className="p-3 rounded-xl bg-white border border-slate-200/80 grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs font-mono">
+                          <div>
+                            <span className="text-[10px] text-slate-400 block font-sans">
+                              Cipher Suite
+                            </span>
+                            <span className="text-slate-800 font-semibold">
+                              {file.encryptionAlgo || 'AES-256-GCM · PBKDF2-SHA256'}
+                            </span>
+                          </div>
+                          <div>
+                            <span className="text-[10px] text-slate-400 block font-sans">
+                              SHA-256 Fingerprint
+                            </span>
+                            <span className="text-emerald-700 font-semibold">
+                              {file.encryptionFingerprint || 'Verified'}
+                            </span>
+                          </div>
+                          {file.keyHint && (
+                            <div className="sm:col-span-2 pt-1 border-t border-slate-100 font-sans">
+                              <span className="text-slate-500">Sender Key Hint: </span>
+                              <span className="font-mono font-semibold text-slate-900">
+                                {file.keyHint}
+                              </span>
+                            </div>
+                          )}
+                        </div>
+
+                        <form onSubmit={handleDecryptInSheet} className="space-y-2.5">
+                          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+                            <input
+                              type="text"
+                              value={decryptionInput}
+                              onChange={(e) => {
+                                setDecryptionInput(e.target.value);
+                                setDecryptionError('');
+                              }}
+                              placeholder="Enter passphrase (e.g. relaydrop-2026)..."
+                              className="flex-1 min-h-[44px] px-3.5 py-2 rounded-xl border border-slate-300 bg-white text-sm font-mono text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-600"
+                            />
+                            <button
+                              type="submit"
+                              disabled={isDecrypting}
+                              className="min-h-[44px] px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-xs font-semibold flex items-center justify-center gap-1.5 whitespace-nowrap interactive-press"
+                            >
+                              <KeyRound className="w-4 h-4" />
+                              <span>
+                                {isDecrypting ? 'Decrypting...' : 'Decrypt File'}
+                              </span>
+                            </button>
+                          </div>
+
+                          <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setDecryptionInput('relaydrop-2026');
+                                handleDecryptInSheet(undefined, 'relaydrop-2026');
+                              }}
+                              className="text-emerald-700 hover:text-emerald-800 font-semibold underline underline-offset-2"
+                            >
+                              Unlock with Demo Key (relaydrop-2026)
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setShowCiphertextInspector((v) => !v)}
+                              className="text-slate-600 hover:text-slate-900 font-mono text-[11px]"
+                            >
+                              {showCiphertextInspector
+                                ? 'Hide Ciphertext Envelope'
+                                : 'Inspect Server Ciphertext →'}
+                            </button>
+                          </div>
+
+                          {decryptionError && (
+                            <p className="text-xs font-semibold text-rose-600">
+                              {decryptionError}
+                            </p>
+                          )}
+                        </form>
+
+                        {showCiphertextInspector && (
+                          <div className="rounded-xl bg-slate-950 text-slate-200 p-3.5 font-mono text-[11px] overflow-x-auto border border-slate-800">
+                            <pre className="whitespace-pre-wrap break-all leading-relaxed text-slate-300">
+                              {formatEncryptedEnvelopePreview(file)}
+                            </pre>
+                          </div>
+                        )}
+                      </div>
                     ) : (
                       <div className="space-y-3">
+                        {/* E2EE Status & In-Place Encryption Banner */}
+                        {file.encrypted && decryptedData ? (
+                          <div className="p-3.5 rounded-2xl bg-emerald-50 border border-emerald-200/90 flex flex-wrap items-center justify-between gap-2 text-xs">
+                            <div className="flex items-center gap-2 text-emerald-950">
+                              <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0" />
+                              <span className="font-semibold">
+                                Decrypted in Browser (AES-256-GCM)
+                              </span>
+                              {file.encryptionFingerprint && (
+                                <span className="font-mono text-[11px] text-emerald-700">
+                                  · {file.encryptionFingerprint}
+                                </span>
+                              )}
+                            </div>
+                            <div className="flex items-center gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => setShowCiphertextInspector((v) => !v)}
+                                className="px-2.5 py-1 rounded-lg bg-white hover:bg-emerald-100/60 border border-emerald-200 text-[11px] font-semibold text-emerald-900"
+                              >
+                                {showCiphertextInspector ? 'Hide Ciphertext' : 'Ciphertext'}
+                              </button>
+                              {canEdit && (
+                                <button
+                                  type="button"
+                                  disabled={isSaving}
+                                  onClick={handleRemoveEncryptionInPlace}
+                                  className="px-2.5 py-1 rounded-lg bg-white hover:bg-rose-50 border border-slate-200 text-[11px] font-semibold text-slate-700 hover:text-rose-700"
+                                >
+                                  Remove E2EE
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setDecryptedData(null);
+                                  setDecryptionInput('');
+                                }}
+                                className="px-2.5 py-1 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-[11px] font-semibold text-white"
+                              >
+                                Re-Lock
+                              </button>
+                            </div>
+                          </div>
+                        ) : canEdit ? (
+                          <div className="p-3 rounded-2xl bg-slate-50 border border-slate-200/80 space-y-3">
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="flex items-center gap-2 text-xs">
+                                <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0" />
+                                <span className="font-semibold text-slate-800">
+                                  Zero-Knowledge E2EE Protection
+                                </span>
+                                <span className="text-slate-500 hidden sm:inline">
+                                  · Unencrypted in vault
+                                </span>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => setShowInPlaceEncryptForm((v) => !v)}
+                                className="min-h-[32px] px-3 py-1 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap interactive-press"
+                              >
+                                <KeyRound className="w-3.5 h-3.5 text-emerald-400" />
+                                <span>
+                                  {showInPlaceEncryptForm
+                                    ? 'Cancel'
+                                    : 'Encrypt with AES-256-GCM'}
+                                </span>
+                              </button>
+                            </div>
+
+                            {showInPlaceEncryptForm && (
+                              <form
+                                onSubmit={handleEncryptFileInPlace}
+                                className="pt-2 border-t border-slate-200/80 space-y-2.5"
+                              >
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                  <div className="flex items-center gap-1.5">
+                                    <input
+                                      type="text"
+                                      value={inPlacePassphrase}
+                                      onChange={(e) =>
+                                        setInPlacePassphrase(e.target.value)
+                                      }
+                                      placeholder="Passphrase..."
+                                      className="flex-1 min-h-[38px] px-3 py-1 rounded-xl border border-slate-300 bg-white text-xs font-mono text-slate-900"
+                                    />
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        setInPlacePassphrase(
+                                          generateStrongPassphrase(effectiveRoomCode)
+                                        )
+                                      }
+                                      className="min-h-[38px] px-2.5 py-1 rounded-xl bg-white border border-slate-200 text-xs font-semibold text-slate-700 flex items-center gap-1"
+                                    >
+                                      <RefreshCw className="w-3 h-3 text-emerald-600" />
+                                      <span>Key</span>
+                                    </button>
+                                  </div>
+                                  <input
+                                    type="text"
+                                    value={inPlaceHint}
+                                    onChange={(e) => setInPlaceHint(e.target.value)}
+                                    placeholder="Optional key hint..."
+                                    className="min-h-[38px] px-3 py-1 rounded-xl border border-slate-300 bg-white text-xs text-slate-900"
+                                  />
+                                </div>
+                                <div className="flex justify-end">
+                                  <button
+                                    type="submit"
+                                    disabled={isSaving}
+                                    className="min-h-[36px] px-4 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold"
+                                  >
+                                    {isSaving
+                                      ? 'Encrypting...'
+                                      : 'Confirm AES-256-GCM Encryption'}
+                                  </button>
+                                </div>
+                              </form>
+                            )}
+                          </div>
+                        ) : null}
+
+                        {file.encrypted && decryptedData && showCiphertextInspector && (
+                          <div className="rounded-xl bg-slate-950 text-slate-200 p-3.5 font-mono text-[11px] overflow-x-auto border border-slate-800">
+                            <pre className="whitespace-pre-wrap break-all leading-relaxed text-slate-300">
+                              {formatEncryptedEnvelopePreview(file)}
+                            </pre>
+                          </div>
+                        )}
                         {/* Dual Mode Switcher when a file has BOTH Image and Text (e.g. SVG) */}
                         {hasBothImageAndText && (
                           <div className="flex items-center gap-1.5 p-1 rounded-xl bg-slate-100 w-fit">
@@ -1882,8 +2329,19 @@ export const FileDetailSheet: React.FC<FileDetailSheetProps> = ({
                         </div>
 
                         <div className="flex-1 space-y-3 w-full min-w-0">
-                          {/* Download QR Code Buttons (PNG Card & Vector SVG) */}
+                          {/* Print & Download QR Code Buttons (4x6 Index Card, PNG Card & Vector SVG) */}
                           <div className="flex flex-wrap items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={handlePrintQrCard}
+                              title="Print QR card formatted for a standard 4x6 index card size"
+                              className="min-h-[42px] px-3.5 py-2 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold flex items-center gap-2 transition-colors whitespace-nowrap interactive-press"
+                            >
+                              <Printer className="w-3.5 h-3.5" />
+                              <span>Print QR</span>
+                              <span className="text-[10px] font-mono text-sky-100">4×6"</span>
+                            </button>
+
                             <button
                               type="button"
                               onClick={handleDownloadQrPng}
